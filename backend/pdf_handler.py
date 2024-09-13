@@ -146,7 +146,8 @@ def extract_demanda_information(pdf_stream):
         text = post_process_text(text)
 
         # Try different approaches to capture the name after "VS" in DEMANDA documents
-        nombre_match = re.search(r'VS\s*(.*?)(?=\n|MEDIOS|\.|$)', text)
+        nombre_match = re.search(r'VS\s*([A-Z\s\.]+?)(?=\s+MEDIOS|\n|\s+\n|$)', text)
+
 
         # Log the extracted field
         logger.info(f"Extracted - Nombre (DEMANDA): {nombre_match.group(1) if nombre_match else 'None'}")
