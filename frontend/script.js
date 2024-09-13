@@ -5,11 +5,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const step3 = document.getElementById('step-3');
     const progressSection = document.getElementById('progress-section');
     const resultsSection = document.getElementById('results-section');
-    const errorSection = document.getElementById('error-section');
+    const errorSection = document.getElementById('error-section'); // No longer needed, will remove this
 
     const selectExcelBtn = document.getElementById('select-excel-btn');
     const selectSheetsBtn = document.getElementById('select-sheets-btn');
-    const selectPdfFolderBtn = document.getElementById('select-pdf-folder-btn');
+    const selectPdfFilesBtn = document.getElementById('select-pdf-files-btn');
+    const selectFolderBtn = document.getElementById('select-folder-btn');
     const startProcessingBtn = document.getElementById('start-processing-btn');
     const processAgainBtn = document.getElementById('process-again-btn');
 
@@ -30,7 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let oauthToken;
 
     function onApiLoad() {
-        gapi.load('picker', {'callback': onPickerApiLoad});
+        gapi.load('picker', { 'callback': onPickerApiLoad });
     }
 
     function onPickerApiLoad() {
@@ -44,7 +45,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 'scope': ['https://www.googleapis.com/auth/drive.readonly'],
                 'immediate': false
             },
-            handleAuthResult);
+            handleAuthResult
+        );
     }
 
     function handleAuthResult(authResult) {
@@ -76,45 +78,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function simulateProgressBar(duration, callback) {
-        let progress = 0;
-        const progressBar = document.getElementById('progress-bar');
-        const interval = 50; // milliseconds
-        const increment = (interval / duration) * 100;
-    
-        const progressInterval = setInterval(() => {
-            progress += increment;
-            if (progress >= 100) {
-                progress = 100;
-                clearInterval(progressInterval);
-                if (callback) callback();
-            }
-            progressBar.style.width = progress + '%';
-        }, interval);
-    }
-
-    // Event Listeners
-    selectExcelBtn.addEventListener('click', () => {
-        const fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        fileInput.accept = '.xls,.xlsx';
-        fileInput.onchange = (event) => {
-            const file = event.target.files[0];
-            if (file) {
-                selectedExcelFile = file;
-                selectedExcelFileDiv.textContent = `Archivo seleccionado: ${file.name}`;
-                selectedExcelFileDiv.classList.remove('hidden');
-                step2.classList.remove('hidden');
-            }
-        };
-        fileInput.click();
-    });
-
-    selectSheetsBtn.addEventListener('click', () => {
-        gapi.load('auth', {'callback': onAuthApiLoad});
-    });
-
-    selectPdfFolderBtn.addEventListener('click', async () => {
+    // Event to select PDF files
+    selectPdfFilesBtn.addEventListener('click', async () => {
         if ('showOpenFilePicker' in window) {
             try {
                 const handles = await window.showOpenFilePicker({
@@ -146,20 +111,54 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Event to select folder
+    selectFolderBtn.addEventListener('click', async () => {
+        if ('showDirectoryPicker' in window) {
+            try {
+                const folderHandle = await window.showDirectoryPicker();
+                selectedPdfFolderDiv.textContent = `Carpeta seleccionada: ${folderHandle.name}`;
+                selectedPdfFolderDiv.classList.remove('hidden');
+                step3.classList.remove('hidden');
+            } catch (error) {
+                console.error('Error selecting folder:', error);
+            }
+        } else {
+            alert('Tu navegador no soporta esta funcionalidad. Por favor, usa Chrome o Edge.');
+        }
+    });
+
+    // Simulate Progress Bar
+    function simulateProgressBar(duration, callback) {
+        let progress = 0;
+        const interval = 50; // milliseconds
+        const increment = (interval / duration) * 100;
+
+        const progressInterval = setInterval(() => {
+            progress += increment;
+            if (progress >= 100) {
+                progress = 100;
+                clearInterval(progressInterval);
+                if (callback) callback();
+            }
+            progressBar.style.width = progress + '%';
+        }, interval);
+    }
+
+    // Start processing event
     startProcessingBtn.addEventListener('click', async () => {
         if ((!selectedExcelFile && !selectedSheetsFileId) || pdfFilesData.length === 0) {
             alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs.');
             return;
         }
-    
+
         step1.classList.add('hidden');
         step2.classList.add('hidden');
         step3.classList.add('hidden');
         progressSection.classList.remove('hidden');
-    
+
         // Start the progress bar simulation
         simulateProgressBar(600000); // Duration in milliseconds
-    
+
         // Prepare data to send to backend
         const formData = new FormData();
         if (selectedExcelFile) {
@@ -167,11 +166,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             formData.append('sheetsFileId', selectedSheetsFileId);
         }
-    
+
         pdfFilesData.forEach((file) => {
             formData.append('pdfFiles', file);
         });
-    
+
         // Send data to backend
         try {
             const response = await fetch('/api/process-pdfs', {
@@ -179,28 +178,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: formData,
             });
             const result = await response.json();
-    
+
             // Ensure progress bar reaches 100%
             progressBar.style.width = '100%';
-    
+
             progressSection.classList.add('hidden');
-            if (result.status === 'success') {
-                resultsSection.classList.remove('hidden');
-                resultsDiv.innerHTML = `<p>Procesamiento completado. Archivos guardados en Google Drive.</p>`;
-                document.getElementById('download-excel-btn').classList.remove('hidden');
-                document.getElementById('view-drive-btn').classList.remove('hidden');
-            } else {
-                errorSection.classList.remove('hidden');
-                errorMessagesDiv.textContent = result.message || 'Error durante el procesamiento.';
+            resultsSection.classList.remove('hidden');
+
+            // Display success message
+            resultsDiv.innerHTML = `<p>Procesamiento completado. Archivos guardados en Google Drive.</p>`;
+
+            // Check if there are any errors reported by the backend
+            if (result.errors && result.errors.length > 0) {
+                const errorWarning = document.createElement('p');
+                errorWarning.style.color = 'orange';
+                errorWarning.innerHTML = `Advertencia: Algunos de los PDF's no pudieron ser procesados correctamente. Estos archivos han sido guardados en la carpeta "PDF's con error".`;
+                resultsDiv.appendChild(errorWarning);
             }
+
+            document.getElementById('download-excel-btn').classList.remove('hidden');
+            document.getElementById('view-drive-btn').classList.remove('hidden');
         } catch (error) {
             console.error('Error processing PDFs:', error);
             progressSection.classList.add('hidden');
-            errorSection.classList.remove('hidden');
-            errorMessagesDiv.textContent = 'Error durante el procesamiento.';
+            resultsDiv.innerHTML = `<p>Hubo un error durante el procesamiento de los archivos. Inténtalo de nuevo.</p>`;
         }
     });
 
+    // Reset the form and process again
     processAgainBtn.addEventListener('click', () => {
         // Reset UI
         selectedExcelFile = null;
@@ -211,8 +216,28 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedExcelFileDiv.classList.add('hidden');
         selectedPdfFolderDiv.classList.add('hidden');
         resultsSection.classList.add('hidden');
-        errorSection.classList.add('hidden');
         step1.classList.remove('hidden');
     });
 
+    // Event for selecting Excel files
+    selectExcelBtn.addEventListener('click', () => {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.xls,.xlsx';
+        fileInput.onchange = (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                selectedExcelFile = file;
+                selectedExcelFileDiv.textContent = `Archivo seleccionado: ${file.name}`;
+                selectedExcelFileDiv.classList.remove('hidden');
+                step2.classList.remove('hidden');
+            }
+        };
+        fileInput.click();
+    });
+
+    // Event for selecting Google Sheets
+    selectSheetsBtn.addEventListener('click', () => {
+        gapi.load('auth', { 'callback': onAuthApiLoad });
+    });
 });
