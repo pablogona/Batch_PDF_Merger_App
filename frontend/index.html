@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF Merger App</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Google APIs -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <h1>PDF Merger App</h1>
+
+    <!-- Main Container -->
+    <div class="container">
+        <!-- Step 1: Select Excel/Google Sheets File -->
+        <div id="step-1">
+            <h2>Selecciona el archivo Excel/Google Sheets para registrar datos</h2>
+            <div class="button-group">
+                <button id="select-excel-btn">Seleccionar Archivo Excel</button>
+                <button id="select-sheets-btn">Seleccionar Google Sheets</button>
+            </div>
+            <div id="selected-excel-file" class="file-info hidden"></div>
+        </div>
+
+        <!-- Step 2: Select PDF Folder -->
+        <div id="step-2" class="hidden">
+            <h2>Selecciona la carpeta que contiene los PDFs</h2>
+            <button id="select-pdf-folder-btn">Seleccionar Carpeta de PDFs</button>
+            <div id="selected-pdf-folder" class="file-info hidden"></div>
+        </div>
+
+        <!-- Step 3: Start Processing -->
+        <div id="step-3" class="hidden">
+            <h2>Iniciar Procesamiento</h2>
+            <button id="start-processing-btn">Comenzar</button>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progress-section" class="hidden">
+            <h2>Procesando...</h2>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+            <div id="progress-message"></div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="results-section" class="hidden">
+            <h2>Resultados</h2>
+            <div id="results"></div>
+            <button id="download-excel-btn" class="hidden">Descargar Excel Actualizado</button>
+            <button id="view-drive-btn" class="hidden">Ver en Google Drive</button>
+            <button id="process-again-btn">Procesar Nuevamente</button>
+        </div>
+
+        <!-- Error Section -->
+        <div id="error-section" class="hidden">
+            <h2>Errores Encontrados</h2>
+            <div id="error-messages"></div>
+            <button id="view-error-drive-btn" class="hidden">Ver Errores en Google Drive</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
