@@ -15,7 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const selectedExcelFileDiv = document.getElementById('selected-excel-file');
     const selectedPdfFolderDiv = document.getElementById('selected-pdf-folder');
-    const progressBar = document.getElementById('progress-bar');
+    const progressBar = document.getElementById('progress-bar');  // Keep progressBar declaration here
     const progressMessage = document.getElementById('progress-message');
     const resultsDiv = document.getElementById('results');
     const errorMessagesDiv = document.getElementById('error-messages');
@@ -78,10 +78,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function simulateProgressBar(duration, callback) {
         let progress = 0;
-        const progressBar = document.getElementById('progress-bar');
         const interval = 50; // milliseconds
         const increment = (interval / duration) * 100;
-    
+
         const progressInterval = setInterval(() => {
             progress += increment;
             if (progress >= 100) {
@@ -151,15 +150,15 @@ document.addEventListener('DOMContentLoaded', () => {
             alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs.');
             return;
         }
-    
+
         step1.classList.add('hidden');
         step2.classList.add('hidden');
         step3.classList.add('hidden');
         progressSection.classList.remove('hidden');
-    
+
         // Start the progress bar simulation
         simulateProgressBar(600000); // Duration in milliseconds
-    
+
         // Prepare data to send to backend
         const formData = new FormData();
         if (selectedExcelFile) {
@@ -167,11 +166,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             formData.append('sheetsFileId', selectedSheetsFileId);
         }
-    
+
         pdfFilesData.forEach((file) => {
             formData.append('pdfFiles', file);
         });
-    
+
         // Send data to backend
         try {
             const response = await fetch('/api/process-pdfs', {
@@ -179,14 +178,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: formData,
             });
             const result = await response.json();
-    
+
             // Ensure progress bar reaches 100%
             progressBar.style.width = '100%';
-    
+
             progressSection.classList.add('hidden');
             if (result.status === 'success') {
                 resultsSection.classList.remove('hidden');
-                resultsDiv.innerHTML = `<p>Procesamiento completado. Archivos guardados en Google Drive.</p>`;
+                resultsDiv.innerHTML = `<p>Procesamiento completado. Archivos guardados en la carpeta ${result.folder_name} en Google Drive.</p>`;
                 document.getElementById('download-excel-btn').classList.remove('hidden');
                 document.getElementById('view-drive-btn').classList.remove('hidden');
             } else {

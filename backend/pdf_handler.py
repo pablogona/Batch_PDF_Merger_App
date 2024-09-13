@@ -10,15 +10,14 @@ from backend.drive_sheets import (
     get_folder_ids
 )
 from backend.utils import normalize_text
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_service):
+def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_service, folder_ids):
     try:
-        # Get folder IDs for saving PDFs and Excel files
-        main_folder_id, folder_ids = get_folder_ids(drive_service)
-
+        # Reuse the provided folder IDs, no need to regenerate the folder
         # Read data from the Excel/Google Sheets file
         sheet_data = read_sheet_data(excel_file_id, sheets_service)
         if sheet_data is None:
@@ -59,7 +58,7 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
         for pair in pairs:
             merged_pdf = merge_pdfs(pair['pdfs'])
             if merged_pdf:
-                # Save merged PDF to Drive
+                # Save merged PDF to the "PDFs Unificados" folder
                 folder_id = folder_ids['PDFs Unificados']
 
                 # Update Google Sheets and get CLIENTE_UNICO for naming

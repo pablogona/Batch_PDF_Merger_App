@@ -18,8 +18,6 @@ def get_sheets_service(credentials):
     """Get the Google Sheets API service."""
     return build('sheets', 'v4', credentials=credentials)
 
-# backend/drive_sheets.py
-
 def get_or_create_folder(folder_name, drive_service, parent_id='root'):
     """Get or create a folder in Google Drive."""
     try:
@@ -43,7 +41,6 @@ def get_or_create_folder(folder_name, drive_service, parent_id='root'):
         logger.error(f"Failed to get or create folder '{folder_name}': {str(e)}")
         raise
 
-
 def upload_excel_to_drive(file, drive_service, parent_folder_id=None):
     """Upload an Excel file to Google Drive and convert it to Google Sheets."""
     try:
@@ -60,7 +57,6 @@ def upload_excel_to_drive(file, drive_service, parent_folder_id=None):
     except Exception as e:
         logger.error(f"Failed to upload Excel file: {str(e)}")
         raise
-
 
 def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, retries=3):
     """Upload a file (PDF) to a specific folder in Google Drive, with retry logic."""
@@ -174,17 +170,20 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
         logger.warning(f"Client '{client_name}' not found in the sheet.")
         return None
 
-def get_folder_ids(drive_service):
-    """Get or create the main folder and subfolders, and return their IDs."""
+def get_folder_ids(drive_service, folder_name):
+    """Get or create the main folder and timestamped process subfolders, and return their IDs."""
     main_folder_name = 'PDF Merger App'
     subfolders = ['PDFs Unificados', 'PDFs con Error', 'PDFs Originales']
 
     # Get or create main folder
     main_folder_id = get_or_create_folder(main_folder_name, drive_service)
 
+    # Create timestamped folder for this process
+    process_folder_id = get_or_create_folder(folder_name, drive_service, parent_id=main_folder_id)
+
     folder_ids = {}
     for subfolder in subfolders:
-        folder_id = get_or_create_folder(subfolder, drive_service, parent_id=main_folder_id)
+        folder_id = get_or_create_folder(subfolder, drive_service, parent_id=process_folder_id)
         folder_ids[subfolder] = folder_id
 
-    return main_folder_id, folder_ids
+    return process_folder_id, folder_ids
