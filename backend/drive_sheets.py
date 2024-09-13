@@ -107,27 +107,31 @@ def read_sheet_data(sheet_id, sheets_service):
         logger.error(f"Error reading sheet data: {str(e)}")
         return None
 
-def update_google_sheet(sheet_id, client_number, folio_number, office, sheets_service):
+def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_service):
     """Update a Google Sheet with the given client information."""
     # Read existing data
     df = read_sheet_data(sheet_id, sheets_service)
     if df is None:
         logger.error(f"Failed to read data from sheet with ID {sheet_id}.")
-        return False
+        return None
 
     # Normalize client names
-    if 'Client_Name' not in df.columns:
-        logger.error("Column 'Client_Name' not found in the sheet.")
-        return False
+    if 'NOMBRE_CTE' not in df.columns:
+        logger.error("Column 'NOMBRE_CTE' not found in the sheet.")
+        return None
 
     # Add normalized name column for comparison
-    df['Normalized_Name'] = df['Client_Name'].apply(normalize_text)
-    client_norm = normalize_text(client_number)
+    df['Normalized_Name'] = df['NOMBRE_CTE'].apply(normalize_text)
+    client_norm = normalize_text(client_name)
 
     # Find the row to update
     row_index = df[df['Normalized_Name'] == client_norm].index
     if not row_index.empty:
-        logger.info(f"Client '{client_number}' found in the sheet. Updating information...")
+        logger.info(f"Client '{client_name}' found in the sheet. Updating information...")
+
+        # Extract CLIENTE_UNICO for file naming
+        client_unique = df.loc[row_index, 'CLIENTE_UNICO'].values[0]
+
         # Update the row with folio_number and office
         df.loc[row_index, 'Folio de Registro'] = folio_number
         df.loc[row_index, 'Oficina de Correspondencia'] = office
@@ -142,8 +146,9 @@ def update_google_sheet(sheet_id, client_number, folio_number, office, sheets_se
             valueInputOption='RAW',
             body=body
         ).execute()
-        logger.info(f"Successfully updated client '{client_number}' in the Google Sheet.")
-        return True
+        logger.info(f"Successfully updated client '{client_name}' in the Google Sheet.")
+
+        return client_unique  # Return CLIENTE_UNICO to use for naming the PDF
     else:
-        logger.warning(f"Client '{client_number}' not found in the sheet.")
-        return False
+        logger.warning(f"Client '{client_name}' not found in the sheet.")
+        return None
