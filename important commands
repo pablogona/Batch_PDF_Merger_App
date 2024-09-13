@@ -1,0 +1,29 @@
+PARA SUBIR DESDE VS CODE A GITHUB
+git add .
+git commit -m "descripción"
+git push origin frontend-development
+
+ACTUALIZAR CÓDIGO LOCAL POR EL DE GITHUB
+git pull origin main
+
+CREAR Y ACTIVAR VIRTUAL ENVIRONMENT
+python -m venv .venv                                                     # create new virtual environment
+.\.venv\Scripts\Activate                                                 # activate new virtual environment
+
+DESCARGAR LOS REQUIREMENTS
+pip install -r requirements.txt
+
+
+CLIENT ID
+639342449120-dnbdrqic8g3spmu572oq6fcfqhr0ivqi.apps.googleusercontent.com
+
+Crear nueva branch 
+git branch <nombre>
+
+Borrar branch
+git branch -d <nombre>
+
+Ir a branch
+git checkout <nombre>
+
+salir de branch

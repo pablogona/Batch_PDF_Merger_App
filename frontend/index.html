@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PDF Merger App</title>
     <link rel="stylesheet" href="styles.css">
     <!-- Google APIs -->
@@ -13,7 +14,7 @@
     <h1>PDF Merger App</h1>
 
     <!-- Main Container -->
-    <div class="container">
+    <div class="container centered">
         <!-- Step 1: Select Excel/Google Sheets File -->
         <div id="step-1">
             <h2>Selecciona el archivo Excel/Google Sheets para registrar datos</h2>
@@ -24,10 +25,13 @@
             <div id="selected-excel-file" class="file-info hidden"></div>
         </div>
 
-        <!-- Step 2: Select PDF Folder -->
+        <!-- Step 2: Select PDF Files and Folder -->
         <div id="step-2" class="hidden">
-            <h2>Selecciona la carpeta que contiene los PDFs</h2>
-            <button id="select-pdf-folder-btn">Seleccionar Carpeta de PDFs</button>
+            <h2>Selecciona los archivos PDF o la carpeta</h2>
+            <div class="button-group">
+                <button id="select-pdf-files-btn">Seleccionar PDFs</button>
+                <button id="select-folder-btn">Seleccionar carpeta</button>
+            </div>
             <div id="selected-pdf-folder" class="file-info hidden"></div>
         </div>
 
