@@ -76,6 +76,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function simulateProgressBar(duration, callback) {
+        let progress = 0;
+        const progressBar = document.getElementById('progress-bar');
+        const interval = 50; // milliseconds
+        const increment = (interval / duration) * 100;
+    
+        const progressInterval = setInterval(() => {
+            progress += increment;
+            if (progress >= 100) {
+                progress = 100;
+                clearInterval(progressInterval);
+                if (callback) callback();
+            }
+            progressBar.style.width = progress + '%';
+        }, interval);
+    }
+
     // Event Listeners
     selectExcelBtn.addEventListener('click', () => {
         const fileInput = document.createElement('input');
@@ -134,12 +151,15 @@ document.addEventListener('DOMContentLoaded', () => {
             alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs.');
             return;
         }
-
+    
         step1.classList.add('hidden');
         step2.classList.add('hidden');
         step3.classList.add('hidden');
         progressSection.classList.remove('hidden');
-
+    
+        // Start the progress bar simulation
+        simulateProgressBar(600000); // Duration in milliseconds
+    
         // Prepare data to send to backend
         const formData = new FormData();
         if (selectedExcelFile) {
@@ -147,11 +167,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             formData.append('sheetsFileId', selectedSheetsFileId);
         }
-
+    
         pdfFilesData.forEach((file) => {
             formData.append('pdfFiles', file);
         });
-
+    
         // Send data to backend
         try {
             const response = await fetch('/api/process-pdfs', {
@@ -159,7 +179,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: formData,
             });
             const result = await response.json();
-
+    
+            // Ensure progress bar reaches 100%
+            progressBar.style.width = '100%';
+    
             progressSection.classList.add('hidden');
             if (result.status === 'success') {
                 resultsSection.classList.remove('hidden');
@@ -191,4 +214,5 @@ document.addEventListener('DOMContentLoaded', () => {
         errorSection.classList.add('hidden');
         step1.classList.remove('hidden');
     });
+
 });

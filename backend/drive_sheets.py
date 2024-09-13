@@ -4,6 +4,7 @@ import io
 import pandas as pd
 import logging
 from backend.utils import normalize_text
+import time
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -17,34 +18,41 @@ def get_sheets_service(credentials):
     """Get the Google Sheets API service."""
     return build('sheets', 'v4', credentials=credentials)
 
-def get_or_create_folder(folder_name, drive_service):
+# backend/drive_sheets.py
+
+def get_or_create_folder(folder_name, drive_service, parent_id='root'):
     """Get or create a folder in Google Drive."""
     try:
-        query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and '{parent_id}' in parents and trashed=false"
         response = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
         files = response.get('files', [])
         if files:
+            folder_id = files[0]['id']
             logger.info(f"Folder '{folder_name}' already exists in Google Drive.")
-            return files[0]['id']
         else:
             file_metadata = {
                 'name': folder_name,
-                'mimeType': 'application/vnd.google-apps.folder'
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [parent_id]
             }
             folder = drive_service.files().create(body=file_metadata, fields='id').execute()
+            folder_id = folder.get('id')
             logger.info(f"Folder '{folder_name}' created in Google Drive.")
-            return folder.get('id')
+        return folder_id
     except Exception as e:
         logger.error(f"Failed to get or create folder '{folder_name}': {str(e)}")
         raise
 
-def upload_excel_to_drive(file, drive_service):
+
+def upload_excel_to_drive(file, drive_service, parent_folder_id=None):
     """Upload an Excel file to Google Drive and convert it to Google Sheets."""
     try:
         file_metadata = {
             'name': file.filename,
             'mimeType': 'application/vnd.google-apps.spreadsheet'
         }
+        if parent_folder_id:
+            file_metadata['parents'] = [parent_folder_id]
         media = MediaIoBaseUpload(file, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         logger.info(f"Excel file '{file.filename}' uploaded to Google Drive.")
@@ -53,49 +61,58 @@ def upload_excel_to_drive(file, drive_service):
         logger.error(f"Failed to upload Excel file: {str(e)}")
         raise
 
-def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
-    """Upload a file (PDF) to a specific folder in Google Drive."""
-    try:
-        file_metadata = {
-            'name': file_name,
-            'parents': [folder_id]
-        }
-        media = MediaIoBaseUpload(file_stream, mimetype='application/pdf')
-        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        logger.info(f"PDF '{file_name}' uploaded to folder '{folder_id}' in Google Drive.")
-        return uploaded_file.get('id')
-    except Exception as e:
-        logger.error(f"Failed to upload file '{file_name}' to Google Drive: {str(e)}")
-        raise
+
+def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, retries=3):
+    """Upload a file (PDF) to a specific folder in Google Drive, with retry logic."""
+    attempt = 0
+    while attempt < retries:
+        try:
+            file_metadata = {
+                'name': file_name,
+                'parents': [folder_id]
+            }
+            media = MediaIoBaseUpload(file_stream, mimetype='application/pdf')
+            uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            logger.info(f"PDF '{file_name}' uploaded to folder '{folder_id}' in Google Drive.")
+            return uploaded_file.get('id')
+        except Exception as e:
+            attempt += 1
+            logger.error(f"Failed to upload file '{file_name}' to Google Drive: {str(e)}. Attempt {attempt}/{retries}")
+            if attempt < retries:
+                logger.info("Retrying upload...")
+                time.sleep(2)  # Optional: wait for a short time before retrying
+            else:
+                raise e
 
 def read_sheet_data(sheet_id, sheets_service):
-    """Read data from a Google Sheets file and ensure at least 19 columns."""
+    """Read data from a Google Sheets file and ensure rows have the same number of columns as the header."""
     try:
         result = sheets_service.spreadsheets().values().get(
             spreadsheetId=sheet_id,
-            range='A1:Z1000'  # Fetches up to 26 columns
+            range='A1:Z1000'  # Adjust range as needed
         ).execute()
         values = result.get('values', [])
         if not values:
             logger.error("No data found in the sheet.")
             return None
 
-        # Log the number of columns found
         header = values[0]
-        logger.info(f"Columns in sheet: {len(header)}")
-        logger.info(f"Column names: {header}")
+        data = values[1:]
 
-        # Handle potential empty columns by padding rows
-        max_cols = 19  # Expected number of columns
-        for row in values:
-            row.extend([''] * (max_cols - len(row)))  # Pad missing columns
+        # Ensure each row has the same length as the header
+        num_cols = len(header)
+        for i, row in enumerate(data):
+            if len(row) < num_cols:
+                data[i] = row + [''] * (num_cols - len(row))
+            elif len(row) > num_cols:
+                data[i] = row[:num_cols]
 
         # Create DataFrame with padded rows
-        df = pd.DataFrame(values[1:], columns=header + [f'Empty_Col_{i}' for i in range(len(header), max_cols)])
+        df = pd.DataFrame(data, columns=header)
         logger.info(f"Sheet processed with {len(df.columns)} columns.")
 
         # Ensure the required columns are present
-        required_columns = ['Folio de Registro', 'Oficina de Correspondencia']
+        required_columns = ['FOLIO DE REGISTRO', 'OFICINA DE CORRESPONDENCIA']
         for col in required_columns:
             if col not in df.columns:
                 df[col] = ''
@@ -133,8 +150,12 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
         client_unique = df.loc[row_index, 'CLIENTE_UNICO'].values[0]
 
         # Update the row with folio_number and office
-        df.loc[row_index, 'Folio de Registro'] = folio_number
-        df.loc[row_index, 'Oficina de Correspondencia'] = office
+        df.loc[row_index, 'FOLIO DE REGISTRO'] = folio_number
+        df.loc[row_index, 'OFICINA DE CORRESPONDENCIA'] = office
+
+        # Remove 'Normalized_Name' column before writing back
+        if 'Normalized_Name' in df.columns:
+            df = df.drop(columns=['Normalized_Name'])
 
         # Write updated data back to Google Sheets
         body = {
@@ -152,3 +173,18 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
     else:
         logger.warning(f"Client '{client_name}' not found in the sheet.")
         return None
+
+def get_folder_ids(drive_service):
+    """Get or create the main folder and subfolders, and return their IDs."""
+    main_folder_name = 'PDF Merger App'
+    subfolders = ['PDFs Unificados', 'PDFs con Error', 'PDFs Originales']
+
+    # Get or create main folder
+    main_folder_id = get_or_create_folder(main_folder_name, drive_service)
+
+    folder_ids = {}
+    for subfolder in subfolders:
+        folder_id = get_or_create_folder(subfolder, drive_service, parent_id=main_folder_id)
+        folder_ids[subfolder] = folder_id
+
+    return main_folder_id, folder_ids

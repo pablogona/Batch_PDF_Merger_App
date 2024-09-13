@@ -3,7 +3,7 @@ from werkzeug.utils import secure_filename
 from backend.pdf_handler import process_pdfs_in_folder
 from backend.drive_sheets import (
     get_drive_service, get_sheets_service, upload_excel_to_drive,
-    upload_file_to_drive, get_or_create_folder
+    upload_file_to_drive, get_or_create_folder, get_folder_ids
 )
 from backend.auth import get_credentials  # Import from backend.auth
 import os
@@ -21,6 +21,9 @@ def process_pdfs():
     drive_service = get_drive_service(credentials)
     sheets_service = get_sheets_service(credentials)
 
+    # Get folder IDs
+    main_folder_id, folder_ids = get_folder_ids(drive_service)
+
     excel_file = request.files.get('excelFile')
     sheets_file_id = request.form.get('sheetsFileId')
     pdf_files = request.files.getlist('pdfFiles')
@@ -30,7 +33,7 @@ def process_pdfs():
 
     # Upload Excel file to Drive and get its ID
     if excel_file:
-        excel_file_id = upload_excel_to_drive(excel_file, drive_service)
+        excel_file_id = upload_excel_to_drive(excel_file, drive_service, parent_folder_id=main_folder_id)
     else:
         excel_file_id = sheets_file_id
 

@@ -6,7 +6,8 @@ from backend.drive_sheets import (
     upload_file_to_drive,
     update_google_sheet,
     get_or_create_folder,
-    read_sheet_data
+    read_sheet_data,
+    get_folder_ids
 )
 from backend.utils import normalize_text
 
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_service):
     try:
+        # Get folder IDs for saving PDFs and Excel files
+        main_folder_id, folder_ids = get_folder_ids(drive_service)
+
         # Read data from the Excel/Google Sheets file
         sheet_data = read_sheet_data(excel_file_id, sheets_service)
         if sheet_data is None:
@@ -37,7 +41,7 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
                     full_text = extract_full_text(io.BytesIO(pdf_content))
                     logger.error(f"Full extracted text: {full_text[:2000]}...")  # Log first 2000 characters for debugging
                     # Move PDF to error folder
-                    error_folder_id = get_or_create_folder('PDF Merger App/PDFs con error', drive_service)
+                    error_folder_id = folder_ids['PDFs con Error']
                     upload_file_to_drive(io.BytesIO(pdf_content), error_folder_id, drive_service, pdf_file.filename)
                     continue
 
@@ -56,7 +60,7 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
             merged_pdf = merge_pdfs(pair['pdfs'])
             if merged_pdf:
                 # Save merged PDF to Drive
-                folder_id = get_or_create_folder('PDF Merger App/Merged PDFs', drive_service)
+                folder_id = folder_ids['PDFs Unificados']
 
                 # Update Google Sheets and get CLIENTE_UNICO for naming
                 client_unique = update_google_sheet(
@@ -69,7 +73,7 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
 
                 if client_unique:
                     # Use CLIENTE_UNICO and the name for naming the merged PDF
-                    file_name = f"{client_unique}_{pair['name']}.pdf"
+                    file_name = f"{client_unique} {pair['name']}.pdf"
                     upload_file_to_drive(merged_pdf, folder_id, drive_service, file_name)
                 else:
                     error_files.append({
@@ -95,6 +99,7 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
     except Exception as e:
         logger.error(f"Error processing PDFs: {str(e)}")
         return {'status': 'error', 'message': str(e)}
+
 
 
 def extract_acuse_information(pdf_stream):
