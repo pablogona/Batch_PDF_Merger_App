@@ -75,22 +75,45 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Simulate Progress Bar
-    function simulateProgressBar(duration, callback) {
-        let progress = 0;
-        const interval = 50; // milliseconds
-        const increment = (interval / duration) * 100;
-
-        const progressInterval = setInterval(() => {
-            progress += increment;
-            if (progress >= 100) {
-                progress = 100;
+    // Start polling the server for progress updates
+    function startProgressPolling(taskId) {
+        const interval = 1000; // milliseconds
+        const progressInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/progress/${taskId}`);
+                const data = await response.json();
+                const progress = data.progress;
+                progressBar.style.width = progress + '%';
+    
+                if (progress >= 100) {
+                    clearInterval(progressInterval);
+                    // Fetch final results (you may need to add an endpoint to retrieve task results)
+                    showResults(taskId);
+                }
+            } catch (error) {
                 clearInterval(progressInterval);
-                if (callback) callback();
+                console.error('Error fetching progress:', error);
+                resultsSection.classList.remove('hidden');
+                resultsDiv.innerHTML = `<p>Error during processing: ${error.message || 'Unknown error'}</p>`;
             }
-            progressBar.style.width = progress + '%';
         }, interval);
     }
+    
+    async function showResults(taskId) {
+        try {
+            const response = await fetch(`/api/task-result/${taskId}`);
+            const result = await response.json();
+            if (result.status === 'success') {
+                resultsDiv.innerHTML = `<p>${result.message}</p>`;
+            } else {
+                resultsDiv.innerHTML = `<p>Error: ${result.message}</p>`;
+            }
+        } catch (error) {
+            resultsDiv.innerHTML = `<p>Error fetching results: ${error.message}</p>`;
+        }
+    }
+    
+    
 
     // Event for selecting Excel files
     selectExcelBtn.addEventListener('click', () => {
@@ -187,9 +210,6 @@ document.addEventListener('DOMContentLoaded', () => {
         step3.classList.add('hidden');
         progressSection.classList.remove('hidden');
 
-        // Start the progress bar simulation
-        simulateProgressBar(600000); // Duration in milliseconds
-
         // Prepare data to send to backend
         const formData = new FormData();
         if (selectedExcelFile) {
@@ -202,7 +222,7 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('pdfFiles', file);
         });
 
-        // Send data to backend
+        // Send data to backend and start polling
         try {
             const response = await fetch('/api/process-pdfs', {
                 method: 'POST',
@@ -210,23 +230,11 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const result = await response.json();
 
-            // Ensure progress bar reaches 100%
-            progressBar.style.width = '100%';
-
-            progressSection.classList.add('hidden');
-
-            resultsSection.classList.remove('hidden');
-
             if (result.status === 'success') {
-                resultsDiv.innerHTML = `<p>Procesamiento completado. Archivos guardados en la carpeta ${result.folder_name || ''} en Google Drive.</p>`;
+                startProgressPolling(result.task_id); // Start polling progress with task_id
 
-                // Check if there are any errors reported by the backend
-                if (result.errors && result.errors.length > 0) {
-                    const errorWarning = document.createElement('p');
-                    errorWarning.style.color = 'orange';
-                    errorWarning.innerHTML = `Advertencia: Algunos de los PDF's no pudieron ser procesados correctamente. Estos archivos han sido guardados en la carpeta "PDFs con Error".`;
-                    resultsDiv.appendChild(errorWarning);
-                }
+                resultsSection.classList.remove('hidden');
+                resultsDiv.innerHTML = `<p>Procesamiento iniciado. Los resultados se mostrarán aquí.</p>`;
 
                 document.getElementById('download-excel-btn').classList.remove('hidden');
                 document.getElementById('view-drive-btn').classList.remove('hidden');

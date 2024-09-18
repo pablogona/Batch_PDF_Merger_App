@@ -63,22 +63,28 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, retri
     attempt = 0
     while attempt < retries:
         try:
+            file_stream.seek(0)  # Ensure stream is at position 0
             file_metadata = {
                 'name': file_name,
                 'parents': [folder_id]
             }
             media = MediaIoBaseUpload(file_stream, mimetype='application/pdf')
-            uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            uploaded_file = drive_service.files().create(
+                body=file_metadata, media_body=media, fields='id'
+            ).execute()
             logger.info(f"PDF '{file_name}' uploaded to folder '{folder_id}' in Google Drive.")
             return uploaded_file.get('id')
         except Exception as e:
             attempt += 1
-            logger.error(f"Failed to upload file '{file_name}' to Google Drive: {str(e)}. Attempt {attempt}/{retries}")
+            logger.error(
+                f"Failed to upload file '{file_name}' to Google Drive: {str(e)}. Attempt {attempt}/{retries}"
+            )
             if attempt < retries:
                 logger.info("Retrying upload...")
                 time.sleep(2)  # Optional: wait for a short time before retrying
             else:
                 raise e
+
 
 def read_sheet_data(sheet_id, sheets_service):
     """Read data from a Google Sheets file and ensure rows have the same number of columns as the header."""

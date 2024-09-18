@@ -6,6 +6,7 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import warnings
+from flask_session import Session
 
 # Load environment variables
 load_dotenv()
@@ -14,6 +15,10 @@ load_dotenv()
 app = Flask(__name__, static_folder='frontend', static_url_path='')
 CORS(app)
 app.secret_key = os.getenv('FLASK_SECRET_KEY')
+
+# Configure server-side session storage
+app.config['SESSION_TYPE'] = 'filesystem'  # Use filesystem-based session storage
+Session(app)
 
 # Enable OAuth insecure transport for local development (HTTP)
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
@@ -90,6 +95,24 @@ def check_auth():
     if 'credentials' not in session:
         return jsonify({"authenticated": False}), 401
     return jsonify({"authenticated": True})
+
+# Progress endpoint
+@app.route('/api/progress')
+def progress():
+    progress = session.get('progress', 0)
+    return jsonify({'progress': progress})
+
+# Process result endpoint to retrieve final result
+@app.route('/api/process-result')
+def process_result():
+    result = session.get('process_result')
+    if result:
+        folder_name = session.get('folder_name', '')
+        session.pop('process_result', None)
+        session.pop('folder_name', None)
+        return jsonify({**result, 'folder_name': folder_name})
+    else:
+        return jsonify({'status': 'processing'}), 202  # Still processing
 
 # Function to get credentials from session or refresh them if expired
 def get_credentials():
