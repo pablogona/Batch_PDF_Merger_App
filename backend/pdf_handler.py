@@ -1,3 +1,5 @@
+# backend/pdf_handler.py
+
 import io
 import re
 import logging
@@ -7,21 +9,25 @@ from backend.drive_sheets import (
     update_google_sheet,
     get_or_create_folder,
     read_sheet_data,
-    get_folder_ids
+    get_folder_ids,
+    upload_excel_to_drive
 )
 from backend.utils import normalize_text
+from backend.task_manager import progress_data  # Import shared progress_data
 import time
-
-# Progress data dictionary for tracking task progress
-progress_data = {}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_service, folder_ids, task_id):
+def process_pdfs_in_folder(pdf_files_data, excel_file_content, excel_filename, sheets_file_id,
+                           drive_service, sheets_service, folder_ids, main_folder_id, task_id):
     try:
-        total_pdfs = len(pdf_files)
+        # Phase 1: Process PDFs (0% to 50%)
+        total_pdfs = len(pdf_files_data)
         processed_pdfs = 0
+
+        pdf_info_list = []
+        errors = []  # Collect errors here
 
         logger.info(f"Starting processing of {total_pdfs} PDFs")
 
@@ -30,59 +36,85 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
         error_folder_id = folder_ids['PDFs con Error']
         unified_folder_id = folder_ids['PDFs Unificados']
 
-        pdf_info_list = []
+        # Upload Excel file to Google Drive if provided
+        if excel_file_content:
+            excel_file_stream = io.BytesIO(excel_file_content)
+            excel_file_stream.seek(0)
+            excel_file_id = upload_excel_to_drive(
+                excel_file_stream, excel_filename, drive_service, parent_folder_id=main_folder_id)
+        else:
+            excel_file_id = sheets_file_id
 
-        for pdf_file in pdf_files:
-            pdf_content = pdf_file.read()  # Read the content into memory
-            pdf_stream = io.BytesIO(pdf_content)  # Use a fresh stream for each operation
-            logger.info(f"Processing PDF: {pdf_file.filename}")
+        for pdf_data in pdf_files_data:
+            pdf_content = pdf_data['content']
+            pdf_filename = pdf_data['filename']
+            pdf_stream = io.BytesIO(pdf_content)
+            logger.info(f"Processing PDF: {pdf_filename}")
 
             # Upload original PDF to "PDFs Originales"
             try:
-                upload_file_to_drive(io.BytesIO(pdf_content), originals_folder_id, drive_service, pdf_file.filename)
-                logger.info(f"Successfully uploaded {pdf_file.filename} to 'PDFs Originales'")
+                upload_file_to_drive(io.BytesIO(pdf_content), originals_folder_id, drive_service, pdf_filename)
+                logger.info(f"Successfully uploaded {pdf_filename} to 'PDFs Originales'")
             except Exception as e:
-                logger.error(f"Error uploading original PDF '{pdf_file.filename}' to 'PDFs Originales': {e}")
+                logger.error(f"Error uploading original PDF '{pdf_filename}' to 'PDFs Originales': {e}")
 
             # Attempt to extract "ACUSE" info first
-            info = extract_acuse_information(io.BytesIO(pdf_content))  # Pass a new stream for extraction
+            info = extract_acuse_information(io.BytesIO(pdf_content))
             if not info:
-                logger.info(f"Could not extract ACUSE info from {pdf_file.filename}. Trying DEMANDA extraction.")
-                pdf_stream.seek(0)  # Reset the stream for the next operation
-                info = extract_demanda_information(io.BytesIO(pdf_content))  # Pass a new stream for extraction
+                logger.info(f"Could not extract ACUSE info from {pdf_filename}. Trying DEMANDA extraction.")
+                pdf_stream.seek(0)
+                info = extract_demanda_information(io.BytesIO(pdf_content))
                 if not info:
-                    logger.warning(f"Could not extract DEMANDA info from {pdf_file.filename}. Moving to error folder.")
+                    logger.warning(f"Could not extract DEMANDA info from {pdf_filename}. Moving to error folder.")
+                    # Upload to "PDFs con Error"
                     try:
-                        upload_file_to_drive(io.BytesIO(pdf_content), error_folder_id, drive_service, pdf_file.filename)
-                        logger.info(f"Uploaded {pdf_file.filename} to 'PDFs con Error'")
+                        upload_file_to_drive(io.BytesIO(pdf_content), error_folder_id, drive_service, pdf_filename)
+                        logger.info(f"Uploaded {pdf_filename} to 'PDFs con Error'")
                     except Exception as e:
-                        logger.error(f"Error uploading PDF '{pdf_file.filename}' to 'PDFs con Error': {e}")
-                    continue  # Skip to the next PDF
-
-            # Store extracted info
-            pdf_info_list.append({
-                'file_name': pdf_file.filename,
-                'content': pdf_content,
-                'info': info
-            })
+                        logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+                    # Collect error information
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"Could not extract information from PDF: {pdf_filename}"
+                    })
+                else:
+                    # Store extracted info
+                    pdf_info_list.append({
+                        'file_name': pdf_filename,
+                        'content': pdf_content,
+                        'info': info
+                    })
+            else:
+                # Store extracted info
+                pdf_info_list.append({
+                    'file_name': pdf_filename,
+                    'content': pdf_content,
+                    'info': info
+                })
 
             # Update progress after processing each PDF
             processed_pdfs += 1
-            progress_value = int((processed_pdfs / total_pdfs) * 100)
-            progress_data[task_id] = progress_value  # Update global progress tracking
+            progress_value = (processed_pdfs / total_pdfs) * 50  # Scale to 0-50%
+            progress_data[task_id] = progress_value  # Update shared progress_data
             logger.info(f"Processed {processed_pdfs}/{total_pdfs}. Progress: {progress_value}%")
 
         # Pair PDFs based on names and types
-        pairs, errors = pair_pdfs(pdf_info_list)
+        pairs, pairing_errors = pair_pdfs(pdf_info_list, error_folder_id, drive_service)
+        errors.extend(pairing_errors)  # Add pairing errors to the errors list
 
-        # Process pairs
-        error_files = []
+        # Phase 2: Process Pairs (50% to 100%)
+        total_pairs = len(pairs)
+        processed_pairs = 0
+
+        if total_pairs == 0:
+            total_pairs = 1  # Prevent division by zero
+
         for pair in pairs:
             merged_pdf = merge_pdfs([pair['pdfs'][0], pair['pdfs'][1]])
             if merged_pdf:
                 client_unique = update_google_sheet(
                     excel_file_id,
-                    pair['name'],  # This is the NOMBRE_CTE extracted
+                    pair['name'],
                     pair['info'].get('folio_number'),
                     pair['info'].get('oficina'),
                     sheets_service
@@ -92,45 +124,75 @@ def process_pdfs_in_folder(pdf_files, excel_file_id, drive_service, sheets_servi
                     upload_file_to_drive(merged_pdf, unified_folder_id, drive_service, file_name)
                     logger.info(f"Merged PDF for {pair['name']} uploaded to 'PDFs Unificados'")
                 else:
-                    error_files.append({
-                        'file_name': pair['name'],
+                    errors.append({
+                        'file_name': pair['file_name'],
                         'message': f"Client '{pair['name']}' not found in sheet."
                     })
                     logger.warning(f"Client '{pair['name']}' not found in sheet.")
             else:
-                error_files.append({
-                    'file_name': pair['name'],
+                errors.append({
+                    'file_name': pair['file_name'],
                     'message': f"Failed to merge PDFs for {pair['name']}"
                 })
                 logger.warning(f"Failed to merge PDFs for {pair['name']}")
 
             # Update progress after processing each pair
-            processed_pdfs += 1
-            progress_value = int((processed_pdfs / total_pdfs) * 100)
-            progress_data[task_id] = progress_value  # Continue updating global progress tracking
-            logger.info(f"Processed {processed_pdfs}/{total_pdfs}. Progress: {progress_value}%")
+            processed_pairs += 1
+            progress_value = 50 + (processed_pairs / total_pairs) * 50  # Scale to 50-100%
+            progress_data[task_id] = progress_value  # Continue updating shared progress_data
+            logger.info(f"Processed pair {processed_pairs}/{total_pairs}. Progress: {progress_value}%")
 
         # Finalize progress
         progress_data[task_id] = 100  # Mark the task as complete
         logger.info("PDF processing complete. Final progress: 100%")
 
         # Handle errors
-        if errors or error_files:
+        if errors:
             logger.warning("Some PDFs could not be processed.")
             return {
-                'status': 'error',
-                'message': 'Some PDFs could not be processed.',
-                'errors': error_files
+                'status': 'success',
+                'message': 'Processing complete with some errors.',
+                'errors': errors
             }
         else:
-            return {'status': 'success'}
+            return {'status': 'success', 'message': 'Processing complete.'}
 
     except Exception as e:
         logger.error(f"Error processing PDFs: {str(e)}")
+        progress_data[task_id] = 100  # Ensure progress is marked as complete
         return {'status': 'error', 'message': str(e)}
 
-# Functions for extracting information from PDFs
+# Adjusted extract_demanda_information function
+def extract_demanda_information(pdf_stream):
+    try:
+        reader = PdfReader(pdf_stream)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text()
 
+        # Post-process the text for better extraction
+        text = post_process_text(text)
+
+        # Extract Name
+        nombre_match = re.search(r'VS\s+([A-ZÁÉÍÓÚÑÜ\.\s]+?)(?=\s+(C\.\s+JUEZ|QUEJOSO|TERCERO|PRUEBAS|JUICIO|AMPARO|\n|$))', text, re.UNICODE)
+
+        # Log the extracted field
+        extracted_name = nombre_match.group(1).strip() if nombre_match else None
+        logger.info(f"Extracted - Nombre (DEMANDA): {extracted_name}")
+
+        if nombre_match and extracted_name:
+            return {
+                'name': extracted_name,
+                'type': 'DEMANDA'
+            }
+        else:
+            logger.warning(f"Could not extract name from DEMANDA PDF.")
+            return None
+    except Exception as e:
+        logger.error(f"Error during extraction (DEMANDA): {e}")
+        return None
+
+# Adjusted extract_acuse_information function
 def extract_acuse_information(pdf_stream):
     try:
         reader = PdfReader(pdf_stream)
@@ -147,15 +209,16 @@ def extract_acuse_information(pdf_stream):
         nombre_match = re.search(r'BAZ\s*VS\s*(.*?)(?:\s*ANEXOS\.pdf|\s*\.pdf|\s*$)', text)
 
         # Log results
-        logger.info(f"Extracted - Oficina: {oficina_match.group(0).strip() if oficina_match else 'None'}, "
-                    f"Folio: {folio_match.group(1) if folio_match else 'None'}, "
-                    f"Nombre: {nombre_match.group(1) if nombre_match else 'None'}")
+        extracted_oficina = oficina_match.group(0).strip() if oficina_match else None
+        extracted_folio = folio_match.group(1).strip() if folio_match else None
+        extracted_name = nombre_match.group(1).strip() if nombre_match else None
+        logger.info(f"Extracted - Oficina: {extracted_oficina}, Folio: {extracted_folio}, Nombre: {extracted_name}")
 
-        if oficina_match and folio_match and nombre_match:
+        if extracted_oficina and extracted_folio and extracted_name:
             return {
-                'oficina': oficina_match.group(0).strip(),
-                'folio_number': folio_match.group(1).strip(),
-                'name': nombre_match.group(1).strip(),
+                'oficina': extracted_oficina,
+                'folio_number': extracted_folio,
+                'name': extracted_name,
                 'type': 'ACUSE'
             }
         else:
@@ -163,34 +226,6 @@ def extract_acuse_information(pdf_stream):
             return None
     except Exception as e:
         logger.error(f"Error during extraction (ACUSE): {e}")
-        return None
-
-def extract_demanda_information(pdf_stream):
-    try:
-        reader = PdfReader(pdf_stream)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-
-        # Post-process the text for better extraction
-        text = post_process_text(text)
-
-        # Try different approaches to capture the name after "VS" in DEMANDA documents
-        nombre_match = re.search(r'VS\s*([A-Z\s\.]+?)(?=\s+MEDIOS|\n|\s+\n|$)', text)
-
-        # Log the extracted field
-        logger.info(f"Extracted - Nombre (DEMANDA): {nombre_match.group(1) if nombre_match else 'None'}")
-
-        if nombre_match:
-            return {
-                'name': nombre_match.group(1).strip(),
-                'type': 'DEMANDA'
-            }
-        else:
-            logger.warning(f"Could not extract name from DEMANDA PDF.")
-            return None
-    except Exception as e:
-        logger.error(f"Error during extraction (DEMANDA): {e}")
         return None
 
 # Text post-processing
@@ -222,9 +257,9 @@ def extract_full_text(pdf_stream):
 
 # Pair and merge PDFs
 
-def pair_pdfs(pdf_info_list):
+def pair_pdfs(pdf_info_list, error_folder_id, drive_service):
     """
-    Pairs ACUSE and DEMANDA PDFs based on the extracted names.
+    Pairs ACUSE and DEMANDA PDFs based on the extracted names and uploads unmatched PDFs to 'PDFs con Error'.
     """
     paired_pdfs = []
     errors = []
@@ -233,32 +268,48 @@ def pair_pdfs(pdf_info_list):
     acuse_pdfs = [info for info in pdf_info_list if info['info']['type'] == 'ACUSE']
     demanda_pdfs = [info for info in pdf_info_list if info['info']['type'] == 'DEMANDA']
 
+    # Copy of DEMANDA PDFs to keep track of unmatched ones
+    unmatched_demandas = demanda_pdfs.copy()
+
     # Pair by matching names
     for acuse in acuse_pdfs:
-        matched_demandas = [demanda for demanda in demanda_pdfs if demanda['info']['name'] == acuse['info']['name']]
+        matched_demandas = [demanda for demanda in unmatched_demandas if demanda['info']['name'] == acuse['info']['name']]
 
         if matched_demandas:
             paired_pdfs.append({
                 'pdfs': [acuse['content'], matched_demandas[0]['content']],
-                'client_number': acuse['file_name'].split('_')[0],  # Extract client number from filename
+                'file_name': acuse['file_name'],
                 'name': acuse['info']['name'],
                 'info': acuse['info']
             })
-            demanda_pdfs.remove(matched_demandas[0])  # Remove matched DEMANDA to prevent duplicate matches
+            unmatched_demandas.remove(matched_demandas[0])  # Remove matched DEMANDA
         else:
             errors.append({
                 'file_name': acuse['file_name'],
                 'message': f"No matching DEMANDA found for ACUSE: {acuse['info']['name']}"
             })
+            # Upload unmatched ACUSE PDF to 'PDFs con Error'
+            try:
+                upload_file_to_drive(io.BytesIO(acuse['content']), error_folder_id, drive_service, acuse['file_name'])
+                logger.info(f"Uploaded unmatched ACUSE '{acuse['file_name']}' to 'PDFs con Error'")
+            except Exception as e:
+                logger.error(f"Error uploading unmatched ACUSE '{acuse['file_name']}' to 'PDFs con Error': {e}")
 
     # Handle unmatched DEMANDA PDFs
-    for demanda in demanda_pdfs:
+    for demanda in unmatched_demandas:
         errors.append({
             'file_name': demanda['file_name'],
             'message': f"No matching ACUSE found for DEMANDA: {demanda['info']['name']}"
         })
+        # Upload unmatched DEMANDA PDF to 'PDFs con Error'
+        try:
+            upload_file_to_drive(io.BytesIO(demanda['content']), error_folder_id, drive_service, demanda['file_name'])
+            logger.info(f"Uploaded unmatched DEMANDA '{demanda['file_name']}' to 'PDFs con Error'")
+        except Exception as e:
+            logger.error(f"Error uploading unmatched DEMANDA '{demanda['file_name']}' to 'PDFs con Error': {e}")
 
     return paired_pdfs, errors
+
 
 # Merging PDFs function
 

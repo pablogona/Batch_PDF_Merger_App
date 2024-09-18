@@ -81,23 +81,61 @@ document.addEventListener('DOMContentLoaded', () => {
         const progressInterval = setInterval(async () => {
             try {
                 const response = await fetch(`/api/progress/${taskId}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const data = await response.json();
                 const progress = data.progress;
                 progressBar.style.width = progress + '%';
-    
-                if (progress >= 100) {
+
+                if (data.status === 'completed') {
                     clearInterval(progressInterval);
-                    // Fetch final results (you may need to add an endpoint to retrieve task results)
-                    showResults(taskId);
+                    progressSection.classList.add('hidden');
+                    resultsSection.classList.remove('hidden');
+
+                    if (data.result.status === 'success') {
+                        let message = `<p>${data.result.message}</p>`;
+
+                        if (data.result.errors && data.result.errors.length > 0) {
+                            const errorCount = data.result.errors.length;
+                            if (errorCount <= 10) {
+                                message += `<p>Algunos PDFs no pudieron ser procesados:</p><ul>`;
+                                data.result.errors.forEach(error => {
+                                    message += `<li>${error.file_name}: ${error.message}</li>`;
+                                });
+                                message += `</ul>`;
+                            } else {
+                                message += `<p>Advertencia: ${errorCount} PDFs no pudieron ser procesados y fueron guardados en la carpeta 'PDFs con Error'.</p>`;
+                            }
+                        }
+
+                        resultsDiv.innerHTML = message;
+                        document.getElementById('download-excel-btn').classList.remove('hidden');
+                        document.getElementById('view-drive-btn').classList.remove('hidden');
+                    } else {
+                        resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${data.result.message}</p>`;
+                        document.getElementById('download-excel-btn').classList.add('hidden');
+                        document.getElementById('view-drive-btn').classList.add('hidden');
+                    }
+
+                    // Always show "Procesar Nuevamente" button
+                    processAgainBtn.classList.remove('hidden');
                 }
             } catch (error) {
                 clearInterval(progressInterval);
                 console.error('Error fetching progress:', error);
+                progressSection.classList.add('hidden');
                 resultsSection.classList.remove('hidden');
-                resultsDiv.innerHTML = `<p>Error during processing: ${error.message || 'Unknown error'}</p>`;
+                resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
+                document.getElementById('download-excel-btn').classList.add('hidden');
+                document.getElementById('view-drive-btn').classList.add('hidden');
+
+                // Show only "Procesar Nuevamente" button
+                processAgainBtn.classList.remove('hidden');
             }
         }, interval);
     }
+    
     
     async function showResults(taskId) {
         try {
@@ -209,6 +247,7 @@ document.addEventListener('DOMContentLoaded', () => {
         step2.classList.add('hidden');
         step3.classList.add('hidden');
         progressSection.classList.remove('hidden');
+        resultsSection.classList.add('hidden'); // Hide results section at the start
 
         // Prepare data to send to backend
         const formData = new FormData();
@@ -233,12 +272,12 @@ document.addEventListener('DOMContentLoaded', () => {
             if (result.status === 'success') {
                 startProgressPolling(result.task_id); // Start polling progress with task_id
 
-                resultsSection.classList.remove('hidden');
-                resultsDiv.innerHTML = `<p>Procesamiento iniciado. Los resultados se mostrarán aquí.</p>`;
-
-                document.getElementById('download-excel-btn').classList.remove('hidden');
-                document.getElementById('view-drive-btn').classList.remove('hidden');
+                // Hide results section
+                resultsSection.classList.add('hidden');
+                resultsDiv.innerHTML = '';
             } else {
+                progressSection.classList.add('hidden');
+                resultsSection.classList.remove('hidden');
                 resultsDiv.innerHTML = `<p>Error durante el procesamiento: ${result.message || 'Error desconocido.'}</p>`;
             }
         } catch (error) {

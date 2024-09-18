@@ -41,22 +41,23 @@ def get_or_create_folder(folder_name, drive_service, parent_id='root'):
         logger.error(f"Failed to get or create folder '{folder_name}': {str(e)}")
         raise
 
-def upload_excel_to_drive(file, drive_service, parent_folder_id=None):
+def upload_excel_to_drive(file_stream, file_name, drive_service, parent_folder_id=None):
     """Upload an Excel file to Google Drive and convert it to Google Sheets."""
     try:
         file_metadata = {
-            'name': file.filename,
+            'name': file_name,
             'mimeType': 'application/vnd.google-apps.spreadsheet'
         }
         if parent_folder_id:
             file_metadata['parents'] = [parent_folder_id]
-        media = MediaIoBaseUpload(file, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        media = MediaIoBaseUpload(file_stream, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        logger.info(f"Excel file '{file.filename}' uploaded to Google Drive.")
+        logger.info(f"Excel file '{file_name}' uploaded to Google Drive.")
         return uploaded_file.get('id')
     except Exception as e:
         logger.error(f"Failed to upload Excel file: {str(e)}")
         raise
+
 
 def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, retries=3):
     """Upload a file (PDF) to a specific folder in Google Drive, with retry logic."""
