@@ -17,7 +17,11 @@ CORS(app)
 app.secret_key = os.getenv('FLASK_SECRET_KEY')
 
 # Configure server-side session storage
-app.config['SESSION_TYPE'] = 'filesystem'  # Use filesystem-based session storage
+# Use a writable directory in the deployment environment (such as Google App Engine)
+SESSION_FILE_DIR = '/tmp/flask_session'  # Use '/tmp' for session storage in environments with read-only file systems
+os.makedirs(SESSION_FILE_DIR, exist_ok=True)  # Ensure the directory exists
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_FILE_DIR'] = SESSION_FILE_DIR
 Session(app)
 
 # Enable OAuth insecure transport for local development (HTTP)
