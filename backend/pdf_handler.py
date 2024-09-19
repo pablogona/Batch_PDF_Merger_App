@@ -4,6 +4,7 @@ import io
 import re
 import logging
 from pypdf import PdfReader, PdfWriter
+from googleapiclient.http import MediaIoBaseDownload
 from backend.drive_sheets import (
     upload_file_to_drive,
     update_google_sheet,
@@ -161,6 +162,41 @@ def process_pdfs_in_folder(pdf_files_data, excel_file_content, excel_filename, s
         logger.error(f"Error processing PDFs: {str(e)}")
         progress_data[task_id] = 100  # Ensure progress is marked as complete
         return {'status': 'error', 'message': str(e)}
+
+# Fetch PDFs directly from Google Drive folder
+def fetch_pdfs_from_drive_folder(folder_id, drive_service):
+    """
+    Fetch PDFs from a Google Drive folder by folder ID and return their content.
+    """
+    pdf_files_data = []
+    page_token = None
+
+    while True:
+        response = drive_service.files().list(
+            q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
+            spaces='drive',
+            fields='nextPageToken, files(id, name)',
+            pageToken=page_token
+        ).execute()
+
+        for file in response.get('files', []):
+            # Download the PDF content
+            request = drive_service.files().get_media(fileId=file['id'])
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+            pdf_files_data.append({
+                'filename': file['name'],
+                'content': fh.getvalue()
+            })
+
+        page_token = response.get('nextPageToken', None)
+        if page_token is None:
+            break
+
+    return pdf_files_data
 
 # Adjusted extract_demanda_information function
 def extract_demanda_information(pdf_stream):

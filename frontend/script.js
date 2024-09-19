@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectSheetsBtn = document.getElementById('select-sheets-btn');
     const selectPdfFilesBtn = document.getElementById('select-pdf-files-btn');
     const selectFolderBtn = document.getElementById('select-folder-btn');
+    const selectDriveFolderBtn = document.getElementById('select-drive-folder-btn');  // New button for Google Drive folder selection
     const startProcessingBtn = document.getElementById('start-processing-btn');
     const processAgainBtn = document.getElementById('process-again-btn');
 
@@ -22,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let selectedSheetsFileId = null;
     let selectedPdfFiles = [];
     let pdfFilesData = [];
+    let selectedFolderId = null;  // For storing Google Drive folder ID
 
     // Load Google APIs
     let pickerApiLoaded = false;
@@ -38,8 +40,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function onAuthApiLoad() {
         window.gapi.auth.authorize(
             {
-                'client_id': 'YOUR_CLIENT_ID',
-                'scope': ['https://www.googleapis.com/auth/drive.readonly'],
+                'client_id': '639342449120-dnbdrqic8g3spmu572oq6fcfqhr0ivqi.apps.googleusercontent.com',
+                'scope': ['https://www.googleapis.com/auth/drive'],
                 'immediate': false
             },
             handleAuthResult
@@ -56,7 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function createPicker() {
         if (pickerApiLoaded && oauthToken) {
             const picker = new google.picker.PickerBuilder()
-                .addView(google.picker.ViewId.SPREADSHEETS)
+                .addView(google.picker.ViewId.FOLDERS)  // Changed to FOLDERS view for Google Drive folder selection
                 .setOAuthToken(oauthToken)
                 .setDeveloperKey('YOUR_DEVELOPER_KEY')
                 .setCallback(pickerCallback)
@@ -67,11 +69,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function pickerCallback(data) {
         if (data.action === google.picker.Action.PICKED) {
-            const file = data.docs[0];
-            selectedSheetsFileId = file.id;
-            selectedExcelFileDiv.textContent = `Archivo seleccionado: ${file.name}`;
-            selectedExcelFileDiv.classList.remove('hidden');
-            step2.classList.remove('hidden');
+            const folder = data.docs[0];
+            selectedFolderId = folder.id;
+            selectedPdfFolderDiv.textContent = `Folder selected: ${folder.name}`;
+            selectedPdfFolderDiv.classList.remove('hidden');
+            step3.classList.remove('hidden');
         }
     }
 
@@ -236,10 +238,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Event to select Google Drive folder
+    selectDriveFolderBtn.addEventListener('click', () => {
+        gapi.load('auth', { 'callback': onAuthApiLoad });  // Load Google Drive picker
+    });
+
     // Start processing event
     startProcessingBtn.addEventListener('click', async () => {
-        if ((!selectedExcelFile && !selectedSheetsFileId) || pdfFilesData.length === 0) {
-            alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs.');
+        if ((!selectedExcelFile && !selectedSheetsFileId) || (!selectedPdfFiles.length && !selectedFolderId)) {
+            alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs o una carpeta en Google Drive.');
             return;
         }
 
@@ -257,9 +264,13 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('sheetsFileId', selectedSheetsFileId);
         }
 
-        pdfFilesData.forEach((file) => {
-            formData.append('pdfFiles', file);
-        });
+        if (selectedFolderId) {
+            formData.append('folderId', selectedFolderId);  // Send Google Drive folder ID to backend
+        } else {
+            pdfFilesData.forEach((file) => {
+                formData.append('pdfFiles', file);
+            });
+        }
 
         // Send data to backend and start polling
         try {
@@ -294,6 +305,7 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedExcelFile = null;
         selectedSheetsFileId = null;
         pdfFilesData = [];
+        selectedFolderId = null;  // Reset the Google Drive folder ID
         selectedExcelFileDiv.textContent = '';
         selectedPdfFolderDiv.textContent = '';
         selectedExcelFileDiv.classList.add('hidden');

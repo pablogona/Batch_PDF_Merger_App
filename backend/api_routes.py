@@ -4,7 +4,7 @@ import threading
 import io
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from backend.pdf_handler import process_pdfs_in_folder
+from backend.pdf_handler import process_pdfs_in_folder, fetch_pdfs_from_drive_folder  # Import fetch function
 from backend.drive_sheets import (
     get_drive_service, get_sheets_service, upload_excel_to_drive,
     get_folder_ids
@@ -31,10 +31,10 @@ def process_pdfs():
 
     excel_file = request.files.get('excelFile')
     sheets_file_id = request.form.get('sheetsFileId')
-    pdf_files = request.files.getlist('pdfFiles')
+    folder_id = request.form.get('folderId')  # Folder ID from Google Drive
 
-    if not (excel_file or sheets_file_id) or not pdf_files:
-        return jsonify({"status": "error", "message": "Missing files"}), 400
+    if not (excel_file or sheets_file_id) or not folder_id:
+        return jsonify({"status": "error", "message": "Missing files or folder ID"}), 400
 
     # Read Excel file into memory if provided
     if excel_file:
@@ -44,29 +44,24 @@ def process_pdfs():
         excel_file_content = None
         excel_filename = None
 
-    # Read PDF files into memory
-    pdf_files_data = []
-    for pdf_file in pdf_files:
-        pdf_content = pdf_file.read()
-        pdf_files_data.append({
-            'filename': pdf_file.filename,
-            'content': pdf_content
-        })
-
     # Start a thread to process PDFs without blocking the main thread
     task_id = f"task_{timestamp}"
     progress_data[task_id] = 0  # Initialize progress tracking
 
+    # Use the new function to fetch PDFs from Google Drive based on the folder ID
     thread = threading.Thread(target=process_task, args=(
-        pdf_files_data, excel_file_content, excel_filename, sheets_file_id,
+        folder_id, excel_file_content, excel_filename, sheets_file_id,
         drive_service, sheets_service, folder_ids, main_folder_id, task_id))
     thread.start()
 
     return jsonify({"status": "success", "task_id": task_id})
 
 
-def process_task(pdf_files_data, excel_file_content, excel_filename, sheets_file_id,
+def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
                  drive_service, sheets_service, folder_ids, main_folder_id, task_id):
+    # Fetch PDF files from the specified Google Drive folder
+    pdf_files_data = fetch_pdfs_from_drive_folder(folder_id, drive_service)
+
     result = process_pdfs_in_folder(pdf_files_data, excel_file_content, excel_filename,
                                     sheets_file_id, drive_service, sheets_service,
                                     folder_ids, main_folder_id, task_id)
@@ -87,3 +82,4 @@ def get_progress(task_id):
         response['status'] = 'in_progress'
 
     return jsonify(response)
+
