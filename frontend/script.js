@@ -75,22 +75,83 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Simulate Progress Bar
-    function simulateProgressBar(duration, callback) {
-        let progress = 0;
-        const interval = 50; // milliseconds
-        const increment = (interval / duration) * 100;
+    // Start polling the server for progress updates
+    function startProgressPolling(taskId) {
+        const interval = 1000; // milliseconds
+        const progressInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/progress/${taskId}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                const progress = data.progress;
+                progressBar.style.width = progress + '%';
 
-        const progressInterval = setInterval(() => {
-            progress += increment;
-            if (progress >= 100) {
-                progress = 100;
+                if (data.status === 'completed') {
+                    clearInterval(progressInterval);
+                    progressSection.classList.add('hidden');
+                    resultsSection.classList.remove('hidden');
+
+                    if (data.result.status === 'success') {
+                        let message = `<p>${data.result.message}</p>`;
+
+                        if (data.result.errors && data.result.errors.length > 0) {
+                            const errorCount = data.result.errors.length;
+                            if (errorCount <= 10) {
+                                message += `<p>Algunos PDFs no pudieron ser procesados:</p><ul>`;
+                                data.result.errors.forEach(error => {
+                                    message += `<li>${error.file_name}: ${error.message}</li>`;
+                                });
+                                message += `</ul>`;
+                            } else {
+                                message += `<p>Advertencia: ${errorCount} PDFs no pudieron ser procesados y fueron guardados en la carpeta 'PDFs con Error'.</p>`;
+                            }
+                        }
+
+                        resultsDiv.innerHTML = message;
+                        document.getElementById('download-excel-btn').classList.remove('hidden');
+                        document.getElementById('view-drive-btn').classList.remove('hidden');
+                    } else {
+                        resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${data.result.message}</p>`;
+                        document.getElementById('download-excel-btn').classList.add('hidden');
+                        document.getElementById('view-drive-btn').classList.add('hidden');
+                    }
+
+                    // Always show "Procesar Nuevamente" button
+                    processAgainBtn.classList.remove('hidden');
+                }
+            } catch (error) {
                 clearInterval(progressInterval);
-                if (callback) callback();
+                console.error('Error fetching progress:', error);
+                progressSection.classList.add('hidden');
+                resultsSection.classList.remove('hidden');
+                resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
+                document.getElementById('download-excel-btn').classList.add('hidden');
+                document.getElementById('view-drive-btn').classList.add('hidden');
+
+                // Show only "Procesar Nuevamente" button
+                processAgainBtn.classList.remove('hidden');
             }
-            progressBar.style.width = progress + '%';
         }, interval);
     }
+    
+    
+    async function showResults(taskId) {
+        try {
+            const response = await fetch(`/api/task-result/${taskId}`);
+            const result = await response.json();
+            if (result.status === 'success') {
+                resultsDiv.innerHTML = `<p>${result.message}</p>`;
+            } else {
+                resultsDiv.innerHTML = `<p>Error: ${result.message}</p>`;
+            }
+        } catch (error) {
+            resultsDiv.innerHTML = `<p>Error fetching results: ${error.message}</p>`;
+        }
+    }
+    
+    
 
     // Event for selecting Excel files
     selectExcelBtn.addEventListener('click', () => {
@@ -186,9 +247,7 @@ document.addEventListener('DOMContentLoaded', () => {
         step2.classList.add('hidden');
         step3.classList.add('hidden');
         progressSection.classList.remove('hidden');
-
-        // Start the progress bar simulation
-        simulateProgressBar(600000); // Duration in milliseconds
+        resultsSection.classList.add('hidden'); // Hide results section at the start
 
         // Prepare data to send to backend
         const formData = new FormData();
@@ -202,7 +261,7 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('pdfFiles', file);
         });
 
-        // Send data to backend
+        // Send data to backend and start polling
         try {
             const response = await fetch('/api/process-pdfs', {
                 method: 'POST',
@@ -210,27 +269,15 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const result = await response.json();
 
-            // Ensure progress bar reaches 100%
-            progressBar.style.width = '100%';
-
-            progressSection.classList.add('hidden');
-
-            resultsSection.classList.remove('hidden');
-
             if (result.status === 'success') {
-                resultsDiv.innerHTML = `<p>Procesamiento completado. Archivos guardados en la carpeta ${result.folder_name || ''} en Google Drive.</p>`;
+                startProgressPolling(result.task_id); // Start polling progress with task_id
 
-                // Check if there are any errors reported by the backend
-                if (result.errors && result.errors.length > 0) {
-                    const errorWarning = document.createElement('p');
-                    errorWarning.style.color = 'orange';
-                    errorWarning.innerHTML = `Advertencia: Algunos de los PDF's no pudieron ser procesados correctamente. Estos archivos han sido guardados en la carpeta "PDFs con Error".`;
-                    resultsDiv.appendChild(errorWarning);
-                }
-
-                document.getElementById('download-excel-btn').classList.remove('hidden');
-                document.getElementById('view-drive-btn').classList.remove('hidden');
+                // Hide results section
+                resultsSection.classList.add('hidden');
+                resultsDiv.innerHTML = '';
             } else {
+                progressSection.classList.add('hidden');
+                resultsSection.classList.remove('hidden');
                 resultsDiv.innerHTML = `<p>Error durante el procesamiento: ${result.message || 'Error desconocido.'}</p>`;
             }
         } catch (error) {
