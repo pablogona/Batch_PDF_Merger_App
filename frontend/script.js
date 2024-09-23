@@ -76,8 +76,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Function to create and display the Google Picker
     function createPicker() {
         if (accessToken) {
+            const docsView = new google.picker.DocsView()
+                .setIncludeFolders(true)
+                .setSelectFolderEnabled(true)
+                .setMimeTypes('application/vnd.google-apps.folder');
+    
             const picker = new google.picker.PickerBuilder()
-                .addView(google.picker.ViewId.FOLDERS)  // View for selecting folders
+                .addView(docsView)
                 .setOAuthToken(accessToken)
                 .setDeveloperKey('AIzaSyDeAxY8kuxZUOZyHv7fE2j6T82p2YGo_ww') // Replace with your actual API key
                 .setCallback(pickerCallback)
@@ -87,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Access token is missing.');
         }
     }
+    
 
     // Callback function after folder selection in Picker
     function pickerCallback(data) {
