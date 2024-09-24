@@ -82,12 +82,13 @@ def get_progress(task_id):
     progress = progress_data.get(task_id, 0)
     response = {'progress': progress}
 
-    if progress >= 100:
+    result = result_data.get(task_id)
+    if progress >= 100 and result:
         response['status'] = 'completed'
-        result = result_data.get(task_id, {})
         response['result'] = result
     else:
         response['status'] = 'in_progress'
 
     return jsonify(response)
+
 

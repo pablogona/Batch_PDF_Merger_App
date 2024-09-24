@@ -136,7 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     progressSection.classList.add('hidden');
                     resultsSection.classList.remove('hidden');
 
-                    if (data.result.status === 'success') {
+                    if (data.result && data.result.status === 'success') {
                         let message = `<p>${data.result.message}</p>`;
 
                         if (data.result.errors && data.result.errors.length > 0) {
@@ -154,7 +154,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         resultsDiv.innerHTML = message;
                     } else {
-                        resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${data.result.message}</p>`;
+                        let errorMessage = (data.result && data.result.message) || 'Error desconocido';
+                        resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${errorMessage}</p>`;
+                        document.getElementById('download-excel-btn').classList.add('hidden');
+                        document.getElementById('view-drive-btn').classList.add('hidden');
                     }
 
                     // Always show "Procesar Nuevamente" button
