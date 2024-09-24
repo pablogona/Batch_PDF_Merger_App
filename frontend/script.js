@@ -1,3 +1,5 @@
+// script.js
+
 document.addEventListener('DOMContentLoaded', () => {
     // DOM Elements
     const step1 = document.getElementById('step-1');
@@ -10,72 +12,105 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectSheetsBtn = document.getElementById('select-sheets-btn');
     const selectPdfFilesBtn = document.getElementById('select-pdf-files-btn');
     const selectFolderBtn = document.getElementById('select-folder-btn');
+    const selectDriveFolderBtn = document.getElementById('select-drive-folder-btn');  // Button for Google Drive folder selection
     const startProcessingBtn = document.getElementById('start-processing-btn');
     const processAgainBtn = document.getElementById('process-again-btn');
 
     const selectedExcelFileDiv = document.getElementById('selected-excel-file');
     const selectedPdfFolderDiv = document.getElementById('selected-pdf-folder');
     const progressBar = document.getElementById('progress-bar');
+    const progressMessage = document.getElementById('progress-message'); // Added for progress messages
     const resultsDiv = document.getElementById('results');
 
     let selectedExcelFile = null;
     let selectedSheetsFileId = null;
     let selectedPdfFiles = [];
     let pdfFilesData = [];
+    let selectedFolderId = null;  // For storing Google Drive folder ID
 
-    // Load Google APIs
-    let pickerApiLoaded = false;
-    let oauthToken;
+    // Google API Initialization Flags
+    let gapiInited = false;
+    let gisInited = false;
+    let pickerInited = false;
+    let tokenClient;
+    let accessToken = '';
 
-    function onApiLoad() {
-        gapi.load('picker', { 'callback': onPickerApiLoad });
+    // Function to initialize the Google API client
+    async function initializeGapiClient() {
+        await gapi.client.init({
+            apiKey: 'AIzaSyDeAxY8kuxZUOZyHv7fE2j6T82p2YGo_ww', // Replace with your actual API key
+            discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest'],
+        });
+        gapiInited = true;
+        maybeEnableButtons();
     }
 
-    function onPickerApiLoad() {
-        pickerApiLoaded = true;
-    }
-
-    function onAuthApiLoad() {
-        window.gapi.auth.authorize(
-            {
-                'client_id': 'YOUR_CLIENT_ID',
-                'scope': ['https://www.googleapis.com/auth/drive.readonly'],
-                'immediate': false
+    // Function to initialize the Google Identity Services (GIS)
+    function initializeGis() {
+        tokenClient = google.accounts.oauth2.initTokenClient({
+            client_id: '639342449120-dnbdrqic8g3spmu572oq6fcfqhr0ivqi.apps.googleusercontent.com', // Replace with your actual Client ID
+            scope: 'https://www.googleapis.com/auth/drive',
+            callback: (response) => {
+                if (response.error !== undefined) {
+                    console.error('Token Client Error:', response);
+                    return;
+                }
+                accessToken = response.access_token;
+                createPicker();
             },
-            handleAuthResult
-        );
+        });
+        gisInited = true;
+        maybeEnableButtons();
     }
 
-    function handleAuthResult(authResult) {
-        if (authResult && !authResult.error) {
-            oauthToken = authResult.access_token;
-            createPicker();
+    // Function to enable buttons after GAPI and GIS are initialized
+    function maybeEnableButtons() {
+        if (gapiInited && gisInited) {
+            selectDriveFolderBtn.disabled = false;
+            // Enable other buttons if needed
         }
     }
 
+    // Function to handle authentication button click
+    function handleAuthClick() {
+        tokenClient.requestAccessToken({ prompt: 'consent' });
+    }
+
+    // Function to create and display the Google Picker
     function createPicker() {
-        if (pickerApiLoaded && oauthToken) {
+        if (accessToken) {
+            const docsView = new google.picker.DocsView()
+                .setIncludeFolders(true)
+                .setSelectFolderEnabled(true)
+                .setMimeTypes('application/vnd.google-apps.folder')
+                .setParent('root'); // Optional: set the root as the starting folder
+
             const picker = new google.picker.PickerBuilder()
-                .addView(google.picker.ViewId.SPREADSHEETS)
-                .setOAuthToken(oauthToken)
-                .setDeveloperKey('YOUR_DEVELOPER_KEY')
+                .addView(docsView)
+                .setOAuthToken(accessToken)
+                .setDeveloperKey('AIzaSyDeAxY8kuxZUOZyHv7fE2j6T82p2YGo_ww') // Replace with your actual API key
                 .setCallback(pickerCallback)
                 .build();
             picker.setVisible(true);
+        } else {
+            console.error('Access token is missing.');
         }
     }
 
+    // Callback function after folder selection in Picker
     function pickerCallback(data) {
         if (data.action === google.picker.Action.PICKED) {
-            const file = data.docs[0];
-            selectedSheetsFileId = file.id;
-            selectedExcelFileDiv.textContent = `Archivo seleccionado: ${file.name}`;
-            selectedExcelFileDiv.classList.remove('hidden');
-            step2.classList.remove('hidden');
+            const folder = data.docs[0];
+            selectedFolderId = folder.id;
+            selectedPdfFolderDiv.textContent = `Carpeta seleccionada: ${folder.name}`;
+            selectedPdfFolderDiv.classList.remove('hidden');
+            step3.classList.remove('hidden');
+        } else if (data.action === google.picker.Action.CANCEL) {
+            console.log('Picker canceled');
         }
     }
 
-    // Start polling the server for progress updates
+    // Function to start polling the server for progress updates
     function startProgressPolling(taskId) {
         const interval = 1000; // milliseconds
         const progressInterval = setInterval(async () => {
@@ -87,6 +122,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await response.json();
                 const progress = data.progress;
                 progressBar.style.width = progress + '%';
+
+                // Update progress message based on the progress value
+                if (progress < 10) {
+                    progressMessage.textContent = 'Descargando PDFs desde Google Drive...';
+                } else if (progress < 60) {
+                    progressMessage.textContent = 'Procesando PDFs...';
+                } else if (progress < 100) {
+                    progressMessage.textContent = 'Unificando PDFs...';
+                } else {
+                    progressMessage.textContent = 'Proceso completado.';
+                }
 
                 if (data.status === 'completed') {
                     clearInterval(progressInterval);
@@ -135,23 +181,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }, interval);
     }
-    
-    
-    async function showResults(taskId) {
-        try {
-            const response = await fetch(`/api/task-result/${taskId}`);
-            const result = await response.json();
-            if (result.status === 'success') {
-                resultsDiv.innerHTML = `<p>${result.message}</p>`;
-            } else {
-                resultsDiv.innerHTML = `<p>Error: ${result.message}</p>`;
-            }
-        } catch (error) {
-            resultsDiv.innerHTML = `<p>Error fetching results: ${error.message}</p>`;
-        }
-    }
-    
-    
 
     // Event for selecting Excel files
     selectExcelBtn.addEventListener('click', () => {
@@ -170,12 +199,14 @@ document.addEventListener('DOMContentLoaded', () => {
         fileInput.click();
     });
 
-    // Event for selecting Google Sheets
+    // Event for selecting Google Sheets (if applicable)
     selectSheetsBtn.addEventListener('click', () => {
-        gapi.load('auth', { 'callback': onAuthApiLoad });
+        // Implement similar authentication and picker for Google Sheets if needed
+        // This section can be expanded based on specific requirements
+        handleAuthClick();
     });
 
-    // Event to select PDF files
+    // Event to select PDF files using File Picker
     selectPdfFilesBtn.addEventListener('click', async () => {
         if ('showOpenFilePicker' in window) {
             try {
@@ -208,7 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Event to select folder
+    // Event to select a directory using Directory Picker
     selectFolderBtn.addEventListener('click', async () => {
         if ('showDirectoryPicker' in window) {
             try {
@@ -236,10 +267,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Event to select Google Drive folder
+    selectDriveFolderBtn.addEventListener('click', () => {
+        if (!accessToken) {
+            handleAuthClick();
+        } else {
+            createPicker();
+        }
+    });
+
     // Start processing event
     startProcessingBtn.addEventListener('click', async () => {
-        if ((!selectedExcelFile && !selectedSheetsFileId) || pdfFilesData.length === 0) {
-            alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs.');
+        if ((!selectedExcelFile && !selectedSheetsFileId) || (!pdfFilesData.length && !selectedFolderId)) {
+            alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs o una carpeta en Google Drive.');
             return;
         }
 
@@ -257,9 +297,13 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('sheetsFileId', selectedSheetsFileId);
         }
 
-        pdfFilesData.forEach((file) => {
-            formData.append('pdfFiles', file);
-        });
+        if (selectedFolderId) {
+            formData.append('folderId', selectedFolderId);  // Send Google Drive folder ID to backend
+        } else {
+            pdfFilesData.forEach((file) => {
+                formData.append('pdfFiles', file);
+            });
+        }
 
         // Send data to backend and start polling
         try {
@@ -294,11 +338,30 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedExcelFile = null;
         selectedSheetsFileId = null;
         pdfFilesData = [];
+        selectedFolderId = null;  // Reset the Google Drive folder ID
         selectedExcelFileDiv.textContent = '';
         selectedPdfFolderDiv.textContent = '';
         selectedExcelFileDiv.classList.add('hidden');
         selectedPdfFolderDiv.classList.add('hidden');
         resultsSection.classList.add('hidden');
         step1.classList.remove('hidden');
+
+        // Reset progress bar and message
+        progressBar.style.width = '0%';
+        progressMessage.textContent = '';
+        processAgainBtn.classList.add('hidden');
     });
+
+    // Initialize the Google API client and GIS
+    window.addEventListener('load', () => {
+        // Load the Google API client library
+        gapiLoaded();
+        // Initialize the Google Identity Services
+        initializeGis();
+    });
+
+    // Function to load the Google API client
+    function gapiLoaded() {
+        gapi.load('client:picker', initializeGapiClient);
+    }
 });
