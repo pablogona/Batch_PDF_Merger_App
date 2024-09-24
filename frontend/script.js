@@ -1,3 +1,5 @@
+// script.js
+
 document.addEventListener('DOMContentLoaded', () => {
     // DOM Elements
     const step1 = document.getElementById('step-1');
@@ -17,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectedExcelFileDiv = document.getElementById('selected-excel-file');
     const selectedPdfFolderDiv = document.getElementById('selected-pdf-folder');
     const progressBar = document.getElementById('progress-bar');
+    const progressMessage = document.getElementById('progress-message'); // Added for progress messages
     const resultsDiv = document.getElementById('results');
 
     let selectedExcelFile = null;
@@ -79,8 +82,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const docsView = new google.picker.DocsView()
                 .setIncludeFolders(true)
                 .setSelectFolderEnabled(true)
-                .setMimeTypes('application/vnd.google-apps.folder');
-    
+                .setMimeTypes('application/vnd.google-apps.folder')
+                .setParent('root'); // Optional: set the root as the starting folder
+
             const picker = new google.picker.PickerBuilder()
                 .addView(docsView)
                 .setOAuthToken(accessToken)
@@ -92,7 +96,6 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Access token is missing.');
         }
     }
-    
 
     // Callback function after folder selection in Picker
     function pickerCallback(data) {
@@ -119,6 +122,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await response.json();
                 const progress = data.progress;
                 progressBar.style.width = progress + '%';
+
+                // Update progress message based on the progress value
+                if (progress < 10) {
+                    progressMessage.textContent = 'Descargando PDFs desde Google Drive...';
+                } else if (progress < 60) {
+                    progressMessage.textContent = 'Procesando PDFs...';
+                } else if (progress < 100) {
+                    progressMessage.textContent = 'Unificando PDFs...';
+                } else {
+                    progressMessage.textContent = 'Proceso completado.';
+                }
 
                 if (data.status === 'completed') {
                     clearInterval(progressInterval);
@@ -331,6 +345,11 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedPdfFolderDiv.classList.add('hidden');
         resultsSection.classList.add('hidden');
         step1.classList.remove('hidden');
+
+        // Reset progress bar and message
+        progressBar.style.width = '0%';
+        progressMessage.textContent = '';
+        processAgainBtn.classList.add('hidden');
     });
 
     // Initialize the Google API client and GIS
