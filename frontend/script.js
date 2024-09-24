@@ -153,12 +153,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
 
                         resultsDiv.innerHTML = message;
-                        document.getElementById('download-excel-btn').classList.remove('hidden');
-                        document.getElementById('view-drive-btn').classList.remove('hidden');
                     } else {
                         resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${data.result.message}</p>`;
-                        document.getElementById('download-excel-btn').classList.add('hidden');
-                        document.getElementById('view-drive-btn').classList.add('hidden');
                     }
 
                     // Always show "Procesar Nuevamente" button
@@ -170,8 +166,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 progressSection.classList.add('hidden');
                 resultsSection.classList.remove('hidden');
                 resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
-                document.getElementById('download-excel-btn').classList.add('hidden');
-                document.getElementById('view-drive-btn').classList.add('hidden');
 
                 // Show only "Procesar Nuevamente" button
                 processAgainBtn.classList.remove('hidden');
