@@ -9,9 +9,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const resultsSection = document.getElementById('results-section');
 
     const selectExcelBtn = document.getElementById('select-excel-btn');
-    const selectSheetsBtn = document.getElementById('select-sheets-btn');
-    const selectPdfFilesBtn = document.getElementById('select-pdf-files-btn');
-    const selectFolderBtn = document.getElementById('select-folder-btn');
     const selectDriveFolderBtn = document.getElementById('select-drive-folder-btn');  // Button for Google Drive folder selection
     const startProcessingBtn = document.getElementById('start-processing-btn');
     const processAgainBtn = document.getElementById('process-again-btn');
@@ -156,12 +153,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
 
                         resultsDiv.innerHTML = message;
-                        document.getElementById('download-excel-btn').classList.remove('hidden');
-                        document.getElementById('view-drive-btn').classList.remove('hidden');
                     } else {
                         resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${data.result.message}</p>`;
-                        document.getElementById('download-excel-btn').classList.add('hidden');
-                        document.getElementById('view-drive-btn').classList.add('hidden');
                     }
 
                     // Always show "Procesar Nuevamente" button
@@ -173,8 +166,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 progressSection.classList.add('hidden');
                 resultsSection.classList.remove('hidden');
                 resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
-                document.getElementById('download-excel-btn').classList.add('hidden');
-                document.getElementById('view-drive-btn').classList.add('hidden');
 
                 // Show only "Procesar Nuevamente" button
                 processAgainBtn.classList.remove('hidden');
@@ -199,74 +190,6 @@ document.addEventListener('DOMContentLoaded', () => {
         fileInput.click();
     });
 
-    // Event for selecting Google Sheets (if applicable)
-    selectSheetsBtn.addEventListener('click', () => {
-        // Implement similar authentication and picker for Google Sheets if needed
-        // This section can be expanded based on specific requirements
-        handleAuthClick();
-    });
-
-    // Event to select PDF files using File Picker
-    selectPdfFilesBtn.addEventListener('click', async () => {
-        if ('showOpenFilePicker' in window) {
-            try {
-                const handles = await window.showOpenFilePicker({
-                    multiple: true,
-                    types: [{
-                        description: 'PDF Files',
-                        accept: {
-                            'application/pdf': ['.pdf']
-                        }
-                    }]
-                });
-                selectedPdfFiles = handles;
-                selectedPdfFolderDiv.textContent = `Archivos seleccionados: ${handles.length} PDFs`;
-                selectedPdfFolderDiv.classList.remove('hidden');
-                step3.classList.remove('hidden');
-
-                // Read files into data
-                pdfFilesData = [];
-                for (const handle of handles) {
-                    const file = await handle.getFile();
-                    pdfFilesData.push(file);
-                }
-
-            } catch (error) {
-                console.error('Error selecting files:', error);
-            }
-        } else {
-            alert('Tu navegador no soporta esta funcionalidad. Por favor, usa Chrome o Edge.');
-        }
-    });
-
-    // Event to select a directory using Directory Picker
-    selectFolderBtn.addEventListener('click', async () => {
-        if ('showDirectoryPicker' in window) {
-            try {
-                const folderHandle = await window.showDirectoryPicker();
-                selectedPdfFolderDiv.textContent = `Carpeta seleccionada: ${folderHandle.name}`;
-                selectedPdfFolderDiv.classList.remove('hidden');
-                step3.classList.remove('hidden');
-
-                // Read files from the folder
-                pdfFilesData = [];
-                for await (const [name, handle] of folderHandle.entries()) {
-                    if (handle.kind === 'file' && handle.name.endsWith('.pdf')) {
-                        const file = await handle.getFile();
-                        pdfFilesData.push(file);
-                    }
-                }
-
-                // Update the UI with the number of PDFs found
-                selectedPdfFolderDiv.textContent = `Carpeta seleccionada: ${folderHandle.name} (${pdfFilesData.length} PDFs encontrados)`;
-            } catch (error) {
-                console.error('Error selecting folder:', error);
-            }
-        } else {
-            alert('Tu navegador no soporta esta funcionalidad. Por favor, usa Chrome o Edge.');
-        }
-    });
-
     // Event to select Google Drive folder
     selectDriveFolderBtn.addEventListener('click', () => {
         if (!accessToken) {
@@ -278,8 +201,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Start processing event
     startProcessingBtn.addEventListener('click', async () => {
-        if ((!selectedExcelFile && !selectedSheetsFileId) || (!pdfFilesData.length && !selectedFolderId)) {
-            alert('Por favor, selecciona el archivo Excel/Google Sheets y los PDFs o una carpeta en Google Drive.');
+        if (!selectedExcelFile || !selectedFolderId) {
+            alert('Por favor, selecciona el archivo Excel y una carpeta en Google Drive.');
             return;
         }
 
@@ -291,19 +214,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Prepare data to send to backend
         const formData = new FormData();
-        if (selectedExcelFile) {
-            formData.append('excelFile', selectedExcelFile);
-        } else {
-            formData.append('sheetsFileId', selectedSheetsFileId);
-        }
-
-        if (selectedFolderId) {
-            formData.append('folderId', selectedFolderId);  // Send Google Drive folder ID to backend
-        } else {
-            pdfFilesData.forEach((file) => {
-                formData.append('pdfFiles', file);
-            });
-        }
+        formData.append('excelFile', selectedExcelFile);
+        formData.append('folderId', selectedFolderId);  // Send Google Drive folder ID to backend
 
         // Send data to backend and start polling
         try {
