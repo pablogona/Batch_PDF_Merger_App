@@ -7,6 +7,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import warnings
 from flask_session import Session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +23,8 @@ SESSION_FILE_DIR = '/tmp/flask_session'  # Use '/tmp' for session storage in env
 os.makedirs(SESSION_FILE_DIR, exist_ok=True)  # Ensure the directory exists
 app.config['SESSION_TYPE'] = 'filesystem'
 app.config['SESSION_FILE_DIR'] = SESSION_FILE_DIR
+app.config['PREFERRED_URL_SCHEME'] = 'https'
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 Session(app)
 
 # Enable OAuth insecure transport for local development (HTTP)
@@ -39,6 +42,11 @@ def index():
 # Login route for Google OAuth
 @app.route('/login')
 def login():
+    if os.environ.get('TEST_MODE') == 'True':
+        redirect_uri = os.environ.get('OAUTH_REDIRECT_URI')
+    else:
+        redirect_uri = os.environ.get('PRODUCTION_REDIRECT_URI')
+
     flow = Flow.from_client_secrets_file(
         client_secrets_file,
         scopes=[
@@ -46,7 +54,7 @@ def login():
             'https://www.googleapis.com/auth/drive',
             'https://www.googleapis.com/auth/spreadsheets'
         ],
-        redirect_uri=url_for('callback', _external=True)
+        redirect_uri=redirect_uri
     )
     authorization_url, state = flow.authorization_url(
         access_type='offline',
