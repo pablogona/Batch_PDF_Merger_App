@@ -26,4 +26,12 @@ git branch -d <nombre>
 Ir a branch
 git checkout <nombre>
 
-salir de branch
+
+# Launch Ubuntu from PowerShell
+wsl
+
+# Start Redis Service
+sudo service redis-server start # Inside wsl
+
+# Stop Redis Service
+sudo service redis-server stop # Inside wsl

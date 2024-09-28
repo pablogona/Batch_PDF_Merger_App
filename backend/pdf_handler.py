@@ -145,20 +145,19 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
 
         if total_pdfs == 0:
             logger.warning(f"No PDFs found in folder {folder_id}.")
-            # Update progress to 100% since there's nothing to process
-            redis_client.set(f"progress:{task_id}", 100)
             result = {
                 'status': 'success',
                 'message': 'No PDFs found to process.',
                 'errors': []
             }
             redis_client.set(f"result:{task_id}", json.dumps(result))
+            redis_client.set(f"progress:{task_id}", 100)
             return
 
         # Prepare for multiprocessing
         manager = multiprocessing.Manager()
-        pdf_info_list = manager.list()  # Shared list to collect extracted info
-        errors = manager.list()  # Shared list to collect errors
+        pdf_info_list = manager.list()
+        errors = manager.list()
 
         # Initialize extraction progress
         redis_client.set(f"progress:{task_id}:completed_extraction", 0)
@@ -188,7 +187,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
 
         # Pair PDFs based on names and types
         pairs, pairing_errors = pair_pdfs(pdf_info_list, folder_ids['PDFs con Error'], drive_service)
-        errors.extend(pairing_errors)  # Add pairing errors to the errors list
+        errors.extend(pairing_errors)
 
         # Update progress after pairing
         redis_client.set(f"progress:{task_id}", 70)
@@ -205,14 +204,13 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         for pair in pairs:
             merged_pdf = merge_pdfs([pair['pdfs'][0], pair['pdfs'][1]])
             if merged_pdf:
-                # Collect update information for batch update
                 client_unique = update_google_sheet(
                     excel_file_id,
                     pair['name'],
                     pair['info'].get('folio_number'),
                     pair['info'].get('oficina'),
                     sheets_service,
-                    batch_updates=batch_updates  # Pass the batch_updates list
+                    batch_updates=batch_updates
                 )
 
                 if client_unique:
@@ -225,7 +223,6 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                         'message': f"Client '{pair['name']}' not found in sheet."
                     })
                     logger.warning(f"Client '{pair['name']}' not found in sheet.")
-
             else:
                 errors.append({
                     'file_name': pair['file_name'],
@@ -233,9 +230,8 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 })
                 logger.warning(f"Failed to merge PDFs for {pair['name']}")
 
-            # Update progress after processing each pair
             processed_pairs += 1
-            progress_value = 70 + ((processed_pairs / total_pairs) * 30)  # Scale to 70-100%
+            progress_value = 70 + ((processed_pairs / total_pairs) * 29)  # Scale to 70-99%
             redis_client.set(f"progress:{task_id}", progress_value)
             logger.info(f"Processed pair {processed_pairs}/{total_pairs}. Progress: {progress_value:.1f}%")
 
@@ -246,9 +242,6 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         else:
             logger.info("No updates to perform on Google Sheets.")
 
-        # Update overall progress to 100%
-        redis_client.set(f"progress:{task_id}", 100)
-
         # Prepare the final result
         result = {
             'status': 'success',
@@ -256,8 +249,11 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             'errors': errors
         }
 
-        # Store the result in Redis
+        # Store the result in Redis before setting progress to 100%
         redis_client.set(f"result:{task_id}", json.dumps(result))
+
+        # Update overall progress to 100%
+        redis_client.set(f"progress:{task_id}", 100)
 
     except Exception as e:
         # Handle exceptions and update Redis

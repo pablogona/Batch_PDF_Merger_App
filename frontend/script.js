@@ -119,7 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await response.json();
                 const progress = data.progress;
                 progressBar.style.width = progress + '%';
-    
+        
                 // Update progress message based on the progress value
                 if (progress < 10) {
                     progressMessage.textContent = 'Inicializando...';
@@ -132,36 +132,49 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     progressMessage.textContent = 'Proceso completado.';
                 }
-    
+        
                 if (data.status === 'completed') {
                     clearInterval(progressInterval);
-                    progressSection.classList.add('hidden');
-                    resultsSection.classList.remove('hidden');
+                    
+                    // Add a small delay before fetching the result
+                    setTimeout(async () => {
+                        try {
+                            const resultResponse = await fetch(`/api/progress/${taskId}`);
+                            const resultData = await resultResponse.json();
+                            
+                            progressSection.classList.add('hidden');
+                            resultsSection.classList.remove('hidden');
     
-                    if (data.result && data.result.status === 'success') {
-                        let message = `<p>${data.result.message}</p>`;
-    
-                        if (data.result.errors && data.result.errors.length > 0) {
-                            const errorCount = data.result.errors.length;
-                            if (errorCount <= 10) {
-                                message += `<p>Algunos PDFs no pudieron ser procesados:</p><ul>`;
-                                data.result.errors.forEach(error => {
-                                    message += `<li>${error.file_name}: ${error.message}</li>`;
-                                });
-                                message += `</ul>`;
+                            if (resultData.result && resultData.result.status === 'success') {
+                                let message = `<p>${resultData.result.message}</p>`;
+        
+                                if (resultData.result.errors && resultData.result.errors.length > 0) {
+                                    const errorCount = resultData.result.errors.length;
+                                    if (errorCount <= 10) {
+                                        message += `<p>Algunos PDFs no pudieron ser procesados:</p><ul>`;
+                                        resultData.result.errors.forEach(error => {
+                                            message += `<li>${error.file_name}: ${error.message}</li>`;
+                                        });
+                                        message += `</ul>`;
+                                    } else {
+                                        message += `<p>Advertencia: ${errorCount} PDFs no pudieron ser procesados y fueron guardados en la carpeta 'PDFs con Error'.</p>`;
+                                    }
+                                }
+        
+                                resultsDiv.innerHTML = message;
                             } else {
-                                message += `<p>Advertencia: ${errorCount} PDFs no pudieron ser procesados y fueron guardados en la carpeta 'PDFs con Error'.</p>`;
+                                let errorMessage = (resultData.result && resultData.result.message) || 'Error desconocido';
+                                resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${errorMessage}</p>`;
                             }
+    
+                            // Always show "Procesar Nuevamente" button
+                            processAgainBtn.classList.remove('hidden');
+                        } catch (error) {
+                            console.error('Error fetching final result:', error);
+                            resultsDiv.innerHTML = `<p>Error al obtener el resultado final: ${error.message || 'Error desconocido'}</p>`;
+                            processAgainBtn.classList.remove('hidden');
                         }
-    
-                        resultsDiv.innerHTML = message;
-                    } else {
-                        let errorMessage = (data.result && data.result.message) || 'Error desconocido';
-                        resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${errorMessage}</p>`;
-                    }
-    
-                    // Always show "Procesar Nuevamente" button
-                    processAgainBtn.classList.remove('hidden');
+                    }, 1000); // 1 second delay
                 }
             } catch (error) {
                 clearInterval(progressInterval);
@@ -169,7 +182,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 progressSection.classList.add('hidden');
                 resultsSection.classList.remove('hidden');
                 resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
-    
+        
                 // Show only "Procesar Nuevamente" button
                 processAgainBtn.classList.remove('hidden');
             }
