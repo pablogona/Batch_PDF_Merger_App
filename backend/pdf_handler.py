@@ -367,8 +367,8 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service):
             combined_info = {**demanda_dict[name]['info'], **acuse_dict[name]['info']}
             pairs.append({
                 'name': name,
-                'pdfs': [demanda_dict[name]['content'], acuse_dict[name]['content']],
-                'info': combined_info,  # Merged info
+                'pdfs': [acuse_dict[name]['content'], demanda_dict[name]['content']],
+                'info': combined_info,
                 'file_name': demanda_dict[name]['file_name']
             })
         else:
