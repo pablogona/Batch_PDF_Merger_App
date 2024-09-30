@@ -1,52 +1,80 @@
-## **Running the PDF Merger App Locally**
+# README
 
-### Option 1: Using a Single Terminal
-This method is quick and suitable for simple development, but logs from Redis and the app will be mixed in one terminal.
+---
 
-1. **Activate the virtual environment.**
+## Running the PDF Merger App via Docker
+
+### Prerequisites
+1. **Docker** installed and running.
+2. **Redis** and your application containers need to be run on the same Docker network.
+
+### Steps for Running the App Locally
+
+### Case 1: Running Redis and the App in the Same Terminal
+1. **Activate the virtual environment**:
    ```bash
    .venv\Scripts\activate
    ```
 
-2. **Start Redis and run the app inside Docker.**
-   In a single terminal, you can run both Redis and your app sequentially:
+2. **Create a Docker network**:
+   This allows the Redis and app containers to communicate.
    ```bash
-   docker run -d -p 6379:6379 --name redis redis
-   docker build -t pdf-merger-app .
-   docker run -e PORT=8080 -p 8080:8080 pdf-merger-app
+   docker network create pdf-merger-network
    ```
 
-3. **Access the app in your browser.**
-   Navigate to `http://localhost:8080` in your browser.
+3. **Run Redis on the network**:
+   Start a Redis container on the network.
+   ```bash
+   docker run -d --name redis --network pdf-merger-network -p 6379:6379 redis
+   ```
+
+4. **Build the app Docker image**:
+   If the app is not yet built, build it using this command.
+   ```bash
+   docker build -t pdf-merger-app .
+   ```
+
+5. **Run the app on the network**:
+   Now, run your app container and ensure it's on the same network as Redis.
+   ```bash
+   docker run -e PORT=8080 --network pdf-merger-network -p 8080:8080 pdf-merger-app
+   ```
+
+6. **Access the app**:
+   Once the app is running, it should be available at `http://localhost:8080`.
 
 ---
 
-### Option 2: Using Two Terminals
-This method separates Redis and the app into two terminals, making it easier to monitor and control each service independently.
+### Case 2: Using Two Separate Terminals (If Preferred)
 
-1. **Terminal 1: Start Redis via Docker.**
+#### Terminal 1:
+1. **Activate the virtual environment**:
    ```bash
    .venv\Scripts\activate
-   docker run -d -p 6379:6379 --name redis redis
    ```
 
-2. **Terminal 2: Build and run your app inside Docker.**
-   In a second terminal, you’ll build the Docker image and run your app:
+2. **Create the Docker network**:
+   (Only needs to be done once)
+   ```bash
+   docker network create pdf-merger-network
+   ```
+
+3. **Run Redis on the network**:
+   ```bash
+   docker run -d --name redis --network pdf-merger-network -p 6379:6379 redis
+   ```
+
+#### Terminal 2:
+1. **Build the app Docker image**:
    ```bash
    docker build -t pdf-merger-app .
-   docker run -e PORT=8080 -p 8080:8080 pdf-merger-app
    ```
 
-3. **Access the app in your browser.**
-   Navigate to `http://localhost:8080` in your browser.
+2. **Run the app container on the network**:
+   ```bash
+   docker run -e PORT=8080 --network pdf-merger-network -p 8080:8080 pdf-merger-app
+   ```
 
----
-
-### **Advantages of Using Two Terminals:**
-- **Monitor logs separately**: You can view Redis logs in one terminal and the app logs in another for easier debugging.
-- **Restart services independently**: You can restart Redis or the app independently without affecting the other service.
-- **Control over long-running services**: If Redis or your app crashes, you can easily monitor and restart one without disrupting the other.
-
-### **When to use each approach:**
-- **Single Terminal**: Use this when doing simple development or quick tests.
-- **Two Terminals**: Use this when you need better control, logging, and management of services.
+### Important Notes:
+- **REDIS_HOST** in your `.env` or `docker-compose.yaml` should be set to `"redis"`, as Redis will be accessible by this hostname when running in the same network.
+  
