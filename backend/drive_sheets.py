@@ -148,14 +148,15 @@ def upload_excel_to_drive(file_stream, file_name, drive_service, parent_folder_i
         raise
 
 @retry_decorator
-def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
+def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, mimetype='application/pdf'):
     """
-    Upload a PDF file to a specific folder in Google Drive.
+    Upload a file to a specific folder in Google Drive.
 
-    :param file_stream: File stream of the PDF.
+    :param file_stream: File stream of the file.
     :param folder_id: ID of the destination folder in Drive.
     :param drive_service: Authorized Google Drive service instance.
-    :param file_name: Name of the PDF file.
+    :param file_name: Name of the file.
+    :param mimetype: MIME type of the file.
     :return: Uploaded file ID.
     """
     try:
@@ -166,7 +167,7 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
         }
         media = MediaIoBaseUpload(
             file_stream,
-            mimetype='application/pdf',
+            mimetype=mimetype,
             resumable=True
         )
         uploaded_file = drive_service.files().create(
@@ -175,7 +176,7 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
             fields='id'
         ).execute()
         file_id = uploaded_file.get('id')
-        logger.info(f"PDF '{file_name}' uploaded to folder '{folder_id}' in Google Drive with ID: {file_id}")
+        logger.info(f"File '{file_name}' uploaded to folder '{folder_id}' in Google Drive with ID: {file_id}")
         return file_id
     except HttpError as e:
         logger.error(f"HttpError in upload_file_to_drive for '{file_name}': {e}")
