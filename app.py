@@ -1,3 +1,5 @@
+# app.py
+
 from flask import Flask, send_from_directory, redirect, request, session, url_for, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -8,17 +10,31 @@ from google.auth.transport.requests import Request
 import warnings
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
+import multiprocessing
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
-# Flask app setup
+# Function to convert Credentials to Dictionary
+def credentials_to_dict(credentials):
+    """
+    Converts Google OAuth credentials to a dictionary for session storage.
+    """
+    return {
+        'token': credentials.token,
+        'refresh_token': credentials.refresh_token,
+        'token_uri': credentials.token_uri,
+        'client_id': credentials.client_id,
+        'client_secret': credentials.client_secret,
+        'scopes': credentials.scopes
+    }
+
+# Create the Flask app
 app = Flask(__name__, static_folder='frontend', static_url_path='')
 CORS(app)
-app.secret_key = os.getenv('FLASK_SECRET_KEY')
+app.secret_key = os.getenv('FLASK_SECRET_KEY')  # Ensure you have FLASK_SECRET_KEY set in your .env
 
 # Configure server-side session storage
-# Use a writable directory in the deployment environment (such as Google App Engine)
 SESSION_FILE_DIR = '/tmp/flask_session'  # Use '/tmp' for session storage in environments with read-only file systems
 os.makedirs(SESSION_FILE_DIR, exist_ok=True)  # Ensure the directory exists
 app.config['SESSION_TYPE'] = 'filesystem'
@@ -30,7 +46,15 @@ Session(app)
 # Enable OAuth insecure transport for local development (HTTP)
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
+# Path to the client_secret.json file for Google OAuth
 client_secrets_file = os.path.join(os.path.dirname(__file__), 'client_secret.json')
+
+# Initialize shared dictionaries as empty dicts
+# These will be overwritten in the main process with Manager dicts
+app.tasks_progress = {}
+app.tasks_result = {}
+
+# ---------------------- Flask Routes ----------------------
 
 # Index route that ensures the user is authenticated
 @app.route('/')
@@ -39,14 +63,19 @@ def index():
         return redirect(url_for('login'))
     return send_from_directory(app.static_folder, 'index.html')
 
-# Login route for Google OAuth
+# Route: Login - Initiates Google OAuth flow
 @app.route('/login')
 def login():
+    """
+    Initiates the Google OAuth2 flow to authenticate the user.
+    """
+    # Determine the redirect URI based on the environment
     if os.environ.get('TEST_MODE') == 'True':
         redirect_uri = os.environ.get('OAUTH_REDIRECT_URI')
     else:
         redirect_uri = os.environ.get('PRODUCTION_REDIRECT_URI')
 
+    # Create the OAuth flow instance
     flow = Flow.from_client_secrets_file(
         client_secrets_file,
         scopes=[
@@ -56,21 +85,29 @@ def login():
         ],
         redirect_uri=redirect_uri
     )
+    
+    # Generate the authorization URL and state
     authorization_url, state = flow.authorization_url(
         access_type='offline',
         prompt='consent'
     )
-    # Store only the `state`, which is a simple string (JSON serializable)
+    
+    # Store the state in the session for security
     session['state'] = state
     return redirect(authorization_url)
 
-# OAuth2 callback route
+# Route: OAuth2 Callback - Handles the response from Google OAuth
 @app.route('/callback')
 def callback():
+    """
+    Handles the OAuth2 callback from Google, exchanges the authorization code for tokens,
+    and stores the credentials in the session.
+    """
     state = session.get('state')
     if not state:
         return redirect(url_for('login'))
 
+    # Recreate the OAuth flow with the state and redirect URI
     flow = Flow.from_client_secrets_file(
         client_secrets_file,
         scopes=[
@@ -84,50 +121,113 @@ def callback():
 
     try:
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # Ignore warnings
-            flow.fetch_token(authorization_response=request.url)
+            warnings.simplefilter("ignore")  # Suppress warnings
+            flow.fetch_token(authorization_response=request.url)  # Exchange code for tokens
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred during OAuth2 callback: {e}")
         return f"An error occurred: {e}", 500
 
+    # Store the credentials in the session
     credentials = flow.credentials
     session['credentials'] = credentials_to_dict(credentials)
-    session.pop('state', None)
+    session.pop('state', None)  # Remove the state from the session for security
     return redirect(url_for('index'))
 
-# Logout route to clear session
+# Route: Logout - Clears the user session
 @app.route('/logout')
 def logout():
+    """
+    Logs out the user by clearing the session.
+    """
     session.clear()
     return redirect('/')
 
-# Check if the user is authenticated (used for frontend)
+# Route: Check Authentication - Used by the frontend to verify if the user is authenticated
 @app.route('/api/check-auth')
 def check_auth():
+    """
+    Checks if the user is authenticated by verifying the presence of credentials in the session.
+    """
     if 'credentials' not in session:
         return jsonify({"authenticated": False}), 401
     return jsonify({"authenticated": True})
 
-# Progress endpoint
-@app.route('/api/progress')
-def progress():
-    progress = session.get('progress', 0)
-    return jsonify({'progress': progress})
+# Route: Progress - Retrieves the progress of a specific task
+@app.route('/api/progress/<task_id>', methods=['GET'])
+def progress(task_id):
+    """
+    Retrieves the current progress and status of a specific PDF processing task.
+    
+    Parameters:
+        task_id (str): The unique identifier of the task.
+        
+    Returns:
+        JSON response containing progress percentage and status.
+    """
+    progress = app.tasks_progress.get(task_id, None)
+    if progress is None:
+        return jsonify({'status': 'unknown task'}), 404
 
-# Process result endpoint to retrieve final result
-@app.route('/api/process-result')
-def process_result():
-    result = session.get('process_result')
+    response = {
+        'progress': progress.get('progress', 0),
+        'status': progress.get('status', 'in_progress')
+    }
+
+    if response['progress'] >= 100:
+        result = app.tasks_result.get(task_id)
+        if result:
+            response['status'] = 'completed'
+            response['result'] = result
+        else:
+            response['status'] = 'completed'
+            response['result'] = {'status': 'error', 'message': 'No result available.'}
+
+    return jsonify(response)
+
+# Route: Process Result - Retrieves the final result of a specific task
+@app.route('/api/process-result/<task_id>', methods=['GET'])
+def process_result(task_id):
+    """
+    Retrieves the final result of a specific PDF processing task.
+    
+    Parameters:
+        task_id (str): The unique identifier of the task.
+        
+    Returns:
+        JSON response containing the result or a processing status.
+    """
+    result = app.tasks_result.get(task_id)
     if result:
-        folder_name = session.get('folder_name', '')
-        session.pop('process_result', None)
-        session.pop('folder_name', None)
-        return jsonify({**result, 'folder_name': folder_name})
+        return jsonify(result)
     else:
         return jsonify({'status': 'processing'}), 202  # Still processing
 
-# Function to get credentials from session or refresh them if expired
+# Import and register the API blueprint from backend/api_routes.py
+from backend.api_routes import api_bp
+app.register_blueprint(api_bp, url_prefix='/api')
+
+# Route: Serve Static Files - Handles all other routes by serving static files
+@app.route('/<path:path>')
+def serve_static(path):
+    """
+    Serves static files from the frontend directory.
+    
+    Parameters:
+        path (str): The path to the static file.
+        
+    Returns:
+        The requested static file.
+    """
+    return send_from_directory(app.static_folder, path)
+
+# Function: Get Credentials - Retrieves and refreshes credentials from the session
 def get_credentials():
+    """
+    Retrieves and refreshes Google OAuth2 credentials from the session.
+    
+    Returns:
+        Credentials object or None if not authenticated.
+    """
     if 'credentials' not in session:
         return None
 
@@ -141,7 +241,7 @@ def get_credentials():
         scopes=credentials_info['scopes']
     )
 
-    # If the credentials are expired, refresh them
+    # Refresh credentials if expired
     if credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(Request())
@@ -151,26 +251,20 @@ def get_credentials():
             return None
     return credentials
 
-# Helper function to convert credentials to dictionary
-def credentials_to_dict(credentials):
-    return {
-        'token': credentials.token,
-        'refresh_token': credentials.refresh_token,
-        'token_uri': credentials.token_uri,
-        'client_id': credentials.client_id,
-        'client_secret': credentials.client_secret,
-        'scopes': credentials.scopes
-    }
-
-# Import and register the API blueprint (assumes you have this in backend/api_routes.py)
-from backend.api_routes import api_bp
-app.register_blueprint(api_bp, url_prefix='/api')
-
-# Serve static files
-@app.route('/<path:path>')
-def serve_static(path):
-    return send_from_directory(app.static_folder, path)
-
+# Entry Point: Run the Flask application
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    # Set the start method to 'spawn' to ensure compatibility on Windows
+    multiprocessing.set_start_method('spawn', force=True)
 
+    # Create a manager for sharing data between processes
+    manager = multiprocessing.Manager()
+    app.tasks_progress = manager.dict()  # Shared dictionary for progress tracking
+    app.tasks_result = manager.dict()    # Shared dictionary for task results
+
+    # Run the Flask app
+    app.run(host="0.0.0.0", port=8080, debug=True)
+else:
+    # In child processes, set tasks_progress and tasks_result to empty dicts
+    # This prevents AttributeError when child processes import app.py
+    app.tasks_progress = {}
+    app.tasks_result = {}

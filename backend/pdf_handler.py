@@ -19,11 +19,9 @@ from backend.drive_sheets import (
     batch_update_google_sheet
 )
 from backend.utils import normalize_text
-from backend.redis_client import redis_client  # Use Redis for progress tracking
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-import concurrent.futures
-import pandas as pd  # Ensure pandas is imported
-import unicodedata  # For text normalization
+import pandas as pd
+import unicodedata
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -67,7 +65,7 @@ def download_drive_file(drive_service, file_id):
         status, done = downloader.next_chunk()
     return fh.getvalue()
 
-def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id):
+def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id, progress_dict):
     """
     Fetch PDFs from a Google Drive folder by folder ID and return their content.
     Updates progress during the fetching process.
@@ -88,7 +86,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id):
             raise e  # Let the retry mechanism handle it
 
     total_pdfs = len(files)
-    redis_client.set(f"progress:{task_id}:total", total_pdfs)
+    progress_dict['total_pdfs'] = total_pdfs
 
     if total_pdfs == 0:
         logger.warning(f"No PDFs found in folder {folder_id}.")
@@ -109,7 +107,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id):
             # Update progress (10% to 30%)
             processed_pdfs += 1
             progress_value = 10 + ((processed_pdfs / total_pdfs) * 20)  # Allocating 20% for fetching
-            redis_client.set(f"progress:{task_id}", progress_value)
+            progress_dict['progress'] = round(progress_value, 2)
             logger.info(f"Fetched {processed_pdfs}/{total_pdfs} PDFs. Progress: {progress_value:.1f}%")
         except HttpError as e:
             logger.error(f"Failed to fetch PDF {file['name']}: {e}")
@@ -133,10 +131,28 @@ def normalize_name(name):
     return name
 
 def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets_file_id,
-                           drive_service, sheets_service, folder_ids, main_folder_id, task_id):
+                           drive_service, sheets_service, folder_ids, main_folder_id, task_id, progress_dict, result_dict,
+                           pdf_info_list, errors, error_data, error_files_set):
     """
     Main function to process PDFs: fetch, extract information, pair, merge, and update sheets.
     Additionally, collects error data and creates an Excel file for PDFs with errors.
+
+    Parameters:
+        folder_id (str): ID of the Google Drive folder containing PDFs.
+        excel_file_content (bytes): Content of the uploaded Excel file.
+        excel_filename (str): Name of the uploaded Excel file.
+        sheets_file_id (str): ID of an existing Google Sheets file.
+        drive_service: Initialized Google Drive service.
+        sheets_service: Initialized Google Sheets service.
+        folder_ids (dict): Dictionary containing IDs of relevant subfolders.
+        main_folder_id (str): ID of the main process-specific folder in Google Drive.
+        task_id (str): Unique identifier for the processing task.
+        progress_dict (dict): Shared dictionary for tracking progress.
+        result_dict (dict): Shared dictionary for storing the final result.
+        pdf_info_list (multiprocessing.Manager().list): Shared list to store extracted PDF info.
+        errors (multiprocessing.Manager().list): Shared list to store error details.
+        error_data (multiprocessing.Manager().list): Shared list to collect error data for Excel.
+        error_files_set (multiprocessing.Manager().dict): Shared dict to track processed error files.
     """
     try:
         # Upload Excel file to Google Drive if provided
@@ -153,13 +169,14 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             raise ValueError("No Excel file content or Sheets file ID provided.")
 
         # Initialize progress to 10% after uploading Excel
-        redis_client.set(f"progress:{task_id}", 10)
+        progress_dict['progress'] = 10
+        progress_dict['status'] = 'Excel uploaded'
 
         # Fetch PDFs
-        pdf_files_data = fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id)
+        pdf_files_data = fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id, progress_dict)
         logger.info(f"Total PDFs fetched for processing: {len(pdf_files_data)}")
         total_pdfs = len(pdf_files_data)
-        redis_client.set(f"progress:{task_id}:total", total_pdfs)
+        progress_dict['total_pdfs'] = total_pdfs
 
         if total_pdfs == 0:
             logger.warning(f"No PDFs found in folder {folder_id}.")
@@ -168,19 +185,13 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 'message': 'No PDFs found to process.',
                 'errors': []
             }
-            redis_client.set(f"result:{task_id}", json.dumps(result))
-            redis_client.set(f"progress:{task_id}", 100)
+            result_dict['result'] = result
+            progress_dict['progress'] = 100
+            progress_dict['status'] = 'Completed with no PDFs'
             return
 
-        # Prepare for multiprocessing
-        manager = multiprocessing.Manager()
-        pdf_info_list = manager.list()
-        errors = manager.list()
-        error_data = manager.list()  # Initialize error data collection
-        error_files_set = manager.dict()  # To keep track of files added to error_data
-
         # Initialize extraction progress
-        redis_client.set(f"progress:{task_id}:completed_extraction", 0)
+        progress_dict['completed_extraction'] = 0
 
         # Create a partial function with fixed arguments
         extract_pdf_info_partial = partial(
@@ -191,7 +202,8 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             error_files_set=error_files_set,  # Pass error_files_set
             drive_service=drive_service,
             folder_ids=folder_ids,
-            task_id=task_id
+            task_id=task_id,
+            progress_dict=progress_dict
         )
 
         # Process PDFs in parallel to extract info
@@ -201,20 +213,16 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         pool.join()
 
         # Update progress to 60% after extraction
-        redis_client.set(f"progress:{task_id}", 60)
-
-        # Convert manager lists to regular lists
-        pdf_info_list = list(pdf_info_list)
-        errors = list(errors)
-        error_data = list(error_data)
-        error_files_set = dict(error_files_set)
+        progress_dict['progress'] = 60
+        progress_dict['status'] = 'Extraction completed'
 
         # Pair PDFs based on names and types
         pairs, pairing_errors = pair_pdfs(pdf_info_list, folder_ids['PDFs con Error'], drive_service, error_data, error_files_set)
         errors.extend(pairing_errors)
 
         # Update progress after pairing
-        redis_client.set(f"progress:{task_id}", 70)
+        progress_dict['progress'] = 70
+        progress_dict['status'] = 'Pairing completed'
 
         # Process pairs
         total_pairs = len(pairs)
@@ -256,7 +264,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
 
             processed_pairs += 1
             progress_value = 70 + ((processed_pairs / total_pairs) * 29)  # Scale to 70-99%
-            redis_client.set(f"progress:{task_id}", progress_value)
+            progress_dict['progress'] = round(progress_value, 2)
             logger.info(f"Processed pair {processed_pairs}/{total_pairs}. Progress: {progress_value:.1f}%")
 
         # After processing all pairs, perform batch update to Google Sheets
@@ -273,7 +281,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 'NOMBRE_CTE',
                 'CLIENTE_UNICO',
                 'FOLIO DE REGISTRO',
-                'OFICINA DE CORRESPONDENCIA'
+                'OFICINA_DE_CORRESPONDENCIA'
             ])
 
             # Ensure 'CLIENTE_UNICO' is empty
@@ -310,21 +318,26 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             'errors': errors
         }
 
-        # Store the result in Redis before setting progress to 100%
-        redis_client.set(f"result:{task_id}", json.dumps(result))
+        # Store the result in the shared dictionary before setting progress to 100%
+        result_dict['result'] = result
 
         # Update overall progress to 100%
-        redis_client.set(f"progress:{task_id}", 100)
+        progress_dict['progress'] = 100
+        progress_dict['status'] = 'Completed'
 
     except Exception as e:
-        # Handle exceptions and update Redis
+        # Handle exceptions and update progress dictionary
         error_result = {'status': 'error', 'message': str(e)}
-        redis_client.set(f"result:{task_id}", json.dumps(error_result))
-        # Ensure overall progress is marked as complete
-        redis_client.set(f"progress:{task_id}", 100)
+        result_dict['result'] = error_result
+        progress_dict['progress'] = 100
+        progress_dict['status'] = 'Error'
         logger.error(f"Error processing PDFs: {str(e)}")
 
-def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_set, drive_service, folder_ids, task_id):
+
+def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_set, drive_service, folder_ids, task_id, progress_dict):
+    """
+    Extract information from a single PDF file.
+    """
     pdf_filename = pdf_data['filename']
     pdf_content = pdf_data['content']
     pdf_stream = io.BytesIO(pdf_content)
@@ -356,7 +369,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 'NOMBRE_CTE': '',
                 'CLIENTE_UNICO': '',
                 'FOLIO DE REGISTRO': '',
-                'OFICINA DE CORRESPONDENCIA': ''
+                'OFICINA_DE_CORRESPONDENCIA': ''
             }
             # Add to error_data if not already added
             if pdf_filename not in error_files_set:
@@ -382,7 +395,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 'NOMBRE_CTE': '',
                 'CLIENTE_UNICO': '',
                 'FOLIO DE REGISTRO': '',
-                'OFICINA DE CORRESPONDENCIA': ''
+                'OFICINA_DE_CORRESPONDENCIA': ''
             }
             # Add to error_data if not already added
             if pdf_filename not in error_files_set:
@@ -424,8 +437,8 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 'DOCUMENTO': pdf_filename,
                 'NOMBRE_CTE': info.get('name', ''),
                 'CLIENTE_UNICO': '',
-                'FOLIO DE REGISTRO': info.get('folio_number', ''),
-                'OFICINA DE CORRESPONDENCIA': info.get('oficina', '')
+                'FOLIO_DE_REGISTRO': info.get('folio_number', ''),
+                'OFICINA_DE_CORRESPONDENCIA': info.get('oficina', '')
             }
             if pdf_filename not in error_files_set:
                 error_data.append(partial_info)
@@ -449,10 +462,11 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             })
 
         # Update progress after processing each PDF
-        completed = redis_client.incr(f"progress:{task_id}:completed_extraction")
-        total_pdfs = int(redis_client.get(f"progress:{task_id}:total") or 1)
+        completed = progress_dict.get('completed_extraction', 0) + 1
+        progress_dict['completed_extraction'] = completed
+        total_pdfs = progress_dict.get('total_pdfs', 1)
         progress_value = 30 + ((completed / total_pdfs) * 30)  # Scale to 30-60%
-        redis_client.set(f"progress:{task_id}", progress_value)
+        progress_dict['progress'] = round(progress_value, 2)
         logger.info(f"Extracted info from {completed}/{total_pdfs} PDFs. Progress: {progress_value:.1f}%")
 
     except Exception as e:
@@ -465,8 +479,8 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             'DOCUMENTO': pdf_filename,
             'NOMBRE_CTE': '',
             'CLIENTE_UNICO': '',
-            'FOLIO DE REGISTRO': '',
-            'OFICINA DE CORRESPONDENCIA': ''
+            'FOLIO_DE_REGISTRO': '',
+            'OFICINA_DE_CORRESPONDENCIA': ''
         }
         if pdf_filename not in error_files_set:
             error_data.append(partial_info)
@@ -557,8 +571,8 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     'DOCUMENTO': pdf_filename,
                     'NOMBRE_CTE': demanda_dict[name]['info'].get('name', ''),
                     'CLIENTE_UNICO': '',
-                    'FOLIO DE REGISTRO': '',
-                    'OFICINA DE CORRESPONDENCIA': ''
+                    'FOLIO_DE_REGISTRO': demanda_dict[name]['info'].get('folio_number', ''),
+                    'OFICINA_DE_CORRESPONDENCIA': demanda_dict[name]['info'].get('oficina', '')
                 }
                 error_data.append(error_entry)
                 error_files_set[pdf_filename] = True
@@ -584,8 +598,8 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     'DOCUMENTO': pdf_filename,
                     'NOMBRE_CTE': acuse_dict[name]['info'].get('name', ''),
                     'CLIENTE_UNICO': '',
-                    'FOLIO DE REGISTRO': acuse_dict[name]['info'].get('folio_number', ''),
-                    'OFICINA DE CORRESPONDENCIA': acuse_dict[name]['info'].get('oficina', '')
+                    'FOLIO_DE_REGISTRO': acuse_dict[name]['info'].get('folio_number', ''),
+                    'OFICINA_DE_CORRESPONDENCIA': acuse_dict[name]['info'].get('oficina', '')
                 }
                 error_data.append(error_entry)
                 error_files_set[pdf_filename] = True
@@ -727,7 +741,6 @@ def extract_acuse_information(pdf_stream):
         # Log any errors encountered
         logger.error(f"Error during extraction (ACUSE): {e}")
         return None
-
 
 def post_process_text(text):
     """
