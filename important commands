@@ -185,3 +185,9 @@ gcloud run deploy pdf-merger-app `
     --memory 8Gi `
     --min-instances 0 `
     --max-instances 2
+
+
+
+
+
+flask run --host=0.0.0.0 --port=8080
