@@ -1,23 +1,32 @@
 # backend/api_routes.py
 
-import threading
-import io
-import time
+import multiprocessing
 import uuid
+import time
+import json
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from backend.pdf_handler import process_pdfs_in_folder, fetch_pdfs_from_drive_folder
+from backend.pdf_handler import process_pdfs_in_folder
 from backend.drive_sheets import (
     get_drive_service, get_sheets_service,
     get_folder_ids
 )
 from backend.auth import get_credentials
-from backend.task_manager import progress_data, result_data  # Import shared data
+from backend.redis_client import redis_client  # Import Redis client
 
 api_bp = Blueprint('api_bp', __name__)
 
 @api_bp.route('/process-pdfs', methods=['POST'])
 def process_pdfs():
+    """
+    Endpoint to initiate PDF processing.
+    Expects:
+        - 'excelFile' (optional): Uploaded Excel file.
+        - 'sheetsFileId' (optional): Google Sheets file ID.
+        - 'folderId' (required): Google Drive folder ID containing PDFs.
+    Returns:
+        - JSON response with status and task_id.
+    """
     credentials = get_credentials()
     if not credentials:
         return jsonify({"status": "error", "message": "User not authenticated"}), 401
@@ -40,55 +49,81 @@ def process_pdfs():
     # Read Excel file into memory if provided
     if excel_file:
         excel_file_content = excel_file.read()
-        excel_filename = excel_file.filename
+        excel_filename = secure_filename(excel_file.filename)
     else:
         excel_file_content = None
         excel_filename = None
 
     # Generate a unique task ID
     task_id = f"task_{uuid.uuid4().hex}"
-    progress_data[task_id] = 0  # Initialize progress tracking
 
-    # Start a thread to process PDFs without blocking the main thread
-    thread = threading.Thread(target=process_task, args=(
+    # Initialize progress in Redis
+    redis_client.set(f"progress:{task_id}:total", 0)  # Total PDFs unknown at this point
+    redis_client.set(f"progress:{task_id}:completed", 0)
+    redis_client.set(f"progress:{task_id}", 0)  # Overall progress
+
+    # Start a multiprocessing.Process to handle the task
+    process = multiprocessing.Process(target=process_task, args=(
         folder_id, excel_file_content, excel_filename, sheets_file_id,
-        drive_service, sheets_service, folder_ids, main_folder_id, task_id))
-    thread.start()
+        credentials.to_json(), folder_ids, main_folder_id, task_id))
+    process.start()
 
     return jsonify({"status": "success", "task_id": task_id}), 200
 
-
 def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
-                 drive_service, sheets_service, folder_ids, main_folder_id, task_id):
+                 credentials_json, folder_ids, main_folder_id, task_id):
+    """
+    Target function for multiprocessing.Process.
+    Processes PDFs and updates Redis with progress and results.
+    """
+    # Recreate the Drive and Sheets services in the child process
+    from google.oauth2.credentials import Credentials
+    from backend.drive_sheets import get_drive_service, get_sheets_service
+
+    credentials = Credentials.from_authorized_user_info(json.loads(credentials_json))
+    drive_service = get_drive_service(credentials)
+    sheets_service = get_sheets_service(credentials)
+
+    from backend.pdf_handler import process_pdfs_in_folder
+
     try:
-        # Fetch PDF files from the specified Google Drive folder with progress updates
-        pdf_files_data = fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id)
-
-        result = process_pdfs_in_folder(pdf_files_data, excel_file_content, excel_filename,
-                                        sheets_file_id, drive_service, sheets_service,
-                                        folder_ids, main_folder_id, task_id)
-        result_data[task_id] = result  # Store the result
+        # Start processing PDFs
+        process_pdfs_in_folder(
+            folder_id, excel_file_content, excel_filename, sheets_file_id,
+            drive_service, sheets_service, folder_ids, main_folder_id, task_id)
+        # Mark overall progress as complete
+        redis_client.set(f"progress:{task_id}", 100)
     except Exception as e:
-        # Handle any exceptions that occur during processing
-        result_data[task_id] = {'status': 'error', 'message': str(e)}
-        progress_data[task_id] = 100  # Ensure progress is marked as complete
-    finally:
-        if task_id not in progress_data or progress_data[task_id] < 100:
-            progress_data[task_id] = 100  # Mark progress as complete if not already
-
+        # Handle exceptions and store error result
+        redis_client.set(f"result:{task_id}", json.dumps({'status': 'error', 'message': str(e)}))
+        # Ensure progress is marked as complete
+        redis_client.set(f"progress:{task_id}", 100)
 
 @api_bp.route('/progress/<task_id>', methods=['GET'])
 def get_progress(task_id):
-    progress = progress_data.get(task_id, 0)
+    """
+    Endpoint to retrieve the progress of a PDF processing task.
+    Expects:
+        - task_id: Unique identifier for the processing task.
+    Returns:
+        - JSON response with progress percentage and status.
+    """
+    progress = redis_client.get(f"progress:{task_id}")
+    if progress is None:
+        return jsonify({'status': 'unknown task'}), 404
+
+    progress = float(progress)
     response = {'progress': progress}
 
-    result = result_data.get(task_id)
-    if progress >= 100 and result:
-        response['status'] = 'completed'
-        response['result'] = result
+    if progress >= 100:
+        result = redis_client.get(f"result:{task_id}")
+        if result:
+            response['status'] = 'completed'
+            response['result'] = json.loads(result)
+        else:
+            response['status'] = 'completed'
+            response['result'] = {'status': 'error', 'message': 'No result available.'}
     else:
         response['status'] = 'in_progress'
 
     return jsonify(response)
-
-

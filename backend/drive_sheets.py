@@ -148,14 +148,15 @@ def upload_excel_to_drive(file_stream, file_name, drive_service, parent_folder_i
         raise
 
 @retry_decorator
-def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
+def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, mimetype='application/pdf'):
     """
-    Upload a PDF file to a specific folder in Google Drive.
+    Upload a file to a specific folder in Google Drive.
 
-    :param file_stream: File stream of the PDF.
+    :param file_stream: File stream of the file.
     :param folder_id: ID of the destination folder in Drive.
     :param drive_service: Authorized Google Drive service instance.
-    :param file_name: Name of the PDF file.
+    :param file_name: Name of the file.
+    :param mimetype: MIME type of the file.
     :return: Uploaded file ID.
     """
     try:
@@ -166,7 +167,7 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
         }
         media = MediaIoBaseUpload(
             file_stream,
-            mimetype='application/pdf',
+            mimetype=mimetype,
             resumable=True
         )
         uploaded_file = drive_service.files().create(
@@ -175,7 +176,7 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name):
             fields='id'
         ).execute()
         file_id = uploaded_file.get('id')
-        logger.info(f"PDF '{file_name}' uploaded to folder '{folder_id}' in Google Drive with ID: {file_id}")
+        logger.info(f"File '{file_name}' uploaded to folder '{folder_id}' in Google Drive with ID: {file_id}")
         return file_id
     except HttpError as e:
         logger.error(f"HttpError in upload_file_to_drive for '{file_name}': {e}")
@@ -272,7 +273,7 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
     :param client_name: Name of the client to update.
     :param folio_number: Folio number to set.
     :param office: Office to set.
-    :param sheets_service: Authorized Sheets API service instance.
+    :param sheets_service: Authorized Google Sheets service instance.
     :param batch_updates: List to collect batch update data. If provided, the update will be added to this list.
     :return: CLIENTE_UNICO of the updated client or None.
     """
@@ -288,17 +289,29 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
             logger.error("Column 'NOMBRE_CTE' not found in the sheet.")
             return None
 
-        # Map column names to indices
+        # Map column names to indices and normalize case for comparison
         column_indices = {col_name: idx for idx, col_name in enumerate(df.columns)}
 
-        # Get indices for required columns
-        folio_col_idx = column_indices.get('FOLIO DE REGISTRO')
-        office_col_idx = column_indices.get('OFICINA DE CORRESPONDENCIA')
+        # Find the index of the 'Folio' column by checking if "Folio" is in the column name, case-insensitive
+        folio_col_idx = next((idx for col_name, idx in column_indices.items() if 'folio' in col_name.lower()), None)
+
+        # Find the index of the 'Oficina' column by checking if "Oficina" is in the column name, case-insensitive
+        office_col_idx = next((idx for col_name, idx in column_indices.items() if 'oficina' in col_name.lower()), None)
+
+        # Find the index of the 'CLIENTE_UNICO' column (if present)
         client_unique_col_idx = column_indices.get('CLIENTE_UNICO')
 
-        if folio_col_idx is None or office_col_idx is None:
-            logger.error("Required columns not found in the sheet.")
-            return None
+        # If 'Folio' column is not found, add it
+        if folio_col_idx is None:
+            df['FOLIO DE REGISTRO'] = ''  # Add the new column
+            folio_col_idx = len(df.columns) - 1  # Get the new index
+            logger.info("Column 'FOLIO DE REGISTRO' was missing and has been added.")
+
+        # If 'Oficina' column is not found, add it
+        if office_col_idx is None:
+            df['OFICINA DE CORRESPONDENCIA'] = ''  # Add the new column
+            office_col_idx = len(df.columns) - 1  # Get the new index
+            logger.info("Column 'OFICINA DE CORRESPONDENCIA' was missing and has been added.")
 
         # Add normalized name column for comparison
         df['Normalized_Name'] = df['NOMBRE_CTE'].apply(normalize_text)
@@ -320,24 +333,17 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
             updates = []
 
             # Prepare updates for each column individually
-            # Update 'FOLIO DE REGISTRO'
+            # Update 'FOLIO' (whatever it's called)
             folio_col_letter = col_idx_to_letter(folio_col_idx)
             folio_range = f"'{sheet_name}'!{folio_col_letter}{row_number}"
             folio_values = [[folio_number]]
             updates.append({'range': folio_range, 'values': folio_values})
 
-            # Update 'OFICINA DE CORRESPONDENCIA'
+            # Update 'OFICINA' (whatever it's called)
             office_col_letter = col_idx_to_letter(office_col_idx)
             office_range = f"'{sheet_name}'!{office_col_letter}{row_number}"
             office_values = [[office]]
             updates.append({'range': office_range, 'values': office_values})
-
-            # Optionally update 'CLIENTE_UNICO' if needed (uncomment if required)
-            # if client_unique_col_idx is not None:
-            #     client_unique_col_letter = col_idx_to_letter(client_unique_col_idx)
-            #     client_unique_range = f"'{sheet_name}'!{client_unique_col_letter}{row_number}"
-            #     client_unique_values = [[client_unique]]
-            #     updates.append({'range': client_unique_range, 'values': client_unique_values})
 
             if batch_updates is not None:
                 # Add updates to batch_updates
@@ -366,6 +372,8 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
     except Exception as e:
         logger.error(f"Error in update_google_sheet for client '{client_name}': {e}")
         raise
+
+
 
 @retry_decorator
 def batch_update_google_sheet(spreadsheet_id, data, sheets_service):
