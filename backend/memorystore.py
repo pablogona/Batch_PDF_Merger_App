@@ -1,35 +1,30 @@
-# backend/redis_client.py
-
 import threading
 import time
-import json
 from collections import defaultdict
 
-class InMemoryRedis:
+class MemoryStore:
     def __init__(self, cleanup_interval=300):
         self._data = defaultdict(dict)
         self._lock = threading.Lock()
         threading.Thread(target=self._cleanup, daemon=True).start()
         self.cleanup_interval = cleanup_interval
 
-    def set(self, key, value):
+    def set(self, namespace, key, value):
         with self._lock:
-            self._data[key] = (value, time.time())
+            self._data[namespace][key] = (value, time.time())
 
-    def get(self, key):
+    def get(self, namespace, key):
         with self._lock:
-            item = self._data.get(key)
+            item = self._data[namespace].get(key)
             if item:
                 return item[0]
             return None
 
-    def incr(self, key):
+    def incr(self, namespace, key):
         with self._lock:
-            current = self.get(key)
-            if current is None:
-                current = 0
+            current = self.get(namespace, key) or 0
             new_value = current + 1
-            self.set(key, new_value)
+            self.set(namespace, key, new_value)
             return new_value
 
     def _cleanup(self):
@@ -40,8 +35,11 @@ class InMemoryRedis:
     def _perform_cleanup(self):
         current_time = time.time()
         with self._lock:
-            for key in list(self._data.keys()):
-                if current_time - self._data[key][1] > 3600:  # 1 hour
-                    del self._data[key]
+            for namespace in list(self._data.keys()):
+                for key in list(self._data[namespace].keys()):
+                    if current_time - self._data[namespace][key][1] > 3600:  # 1 hour
+                        del self._data[namespace][key]
+                if not self._data[namespace]:
+                    del self._data[namespace]
 
-redis_client = InMemoryRedis()
+memory_store = MemoryStore()

@@ -673,6 +673,7 @@ def extract_acuse_information(pdf_stream):
     Extract information from ACUSE PDFs.
     """
     try:
+        # Reading PDF
         reader = PdfReader(pdf_stream)
         text = ""
         for page in reader.pages:
@@ -680,33 +681,41 @@ def extract_acuse_information(pdf_stream):
             if extracted_text:
                 text += extracted_text
 
-        # Post-process the text for better extraction
+        # Optional: Post-process the text (custom function if needed)
         text = post_process_text(text)
 
         # Log the extracted text for debugging
         logger.info(f"Extracted Text from ACUSE PDF:\n{text}")
 
-        # Adjusted regex pattern to exclude 'ANEXOS' from the name
+        # Extract 'nombre' using adjusted regex to exclude 'ANEXOS'
         nombre_match = re.search(
             r'BAZ\s*VS\s*([A-ZÁÉÍÓÚÑÜ\s]+?)(?=\s*ANEXOS\.pdf|\s*ANEXOS\s|\.pdf|\s*$)',
             text
         )
 
-        # Extract relevant information
-        oficina_match = re.search(r'Oficina\s*de\s*Correspondencia\s*Común[\w\s,]*?(?=\s*Folio|Foliode|\s*$)', text)
+        # Extract 'oficina' using refined regex to isolate the office name
+        oficina_match = re.search(
+            r'Oficina\s*de\s*Correspondencia\s*Común\s*:\s*([\w\s,]+?)(?=\s*Folio|Foliode|\s*$)', 
+            text
+        )
+
+        # Extract 'folio' number
         folio_match = re.search(r'Folio\s*de\s*registro:\s*(\d+/\d+)', text)
 
-        # Log results
-        extracted_oficina = oficina_match.group(0).strip() if oficina_match else ''
-        extracted_folio = folio_match.group(1).strip() if folio_match else ''
+        # Extracted values
         extracted_name = nombre_match.group(1).strip() if nombre_match else ''
+        extracted_oficina = oficina_match.group(1).strip() if oficina_match else ''
+        extracted_folio = folio_match.group(1).strip() if folio_match else ''
+
+        # Log the extracted data
         logger.info(f"Extracted - Oficina: {extracted_oficina}, Folio: {extracted_folio}, Nombre: {extracted_name}")
 
+        # If no name is found, return None (error handling)
         if not extracted_name:
             logger.warning("No name match found in ACUSE PDF.")
             return None
 
-        # Return extracted data
+        # Return extracted data as a dictionary
         return {
             'oficina': extracted_oficina,
             'folio_number': extracted_folio,
@@ -715,8 +724,10 @@ def extract_acuse_information(pdf_stream):
         }
 
     except Exception as e:
+        # Log any errors encountered
         logger.error(f"Error during extraction (ACUSE): {e}")
         return None
+
 
 def post_process_text(text):
     """
