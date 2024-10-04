@@ -1,6 +1,7 @@
 # app.py
 
-from flask import Flask, send_from_directory, redirect, request, session, url_for, jsonify
+import multiprocessing
+from flask import Flask, send_from_directory, redirect, request, session, url_for, jsonify, current_app
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
@@ -10,7 +11,6 @@ from google.auth.transport.requests import Request
 import warnings
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
-import multiprocessing
 
 # Load environment variables from .env file
 load_dotenv()
@@ -49,10 +49,36 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 # Path to the client_secret.json file for Google OAuth
 client_secrets_file = os.path.join(os.path.dirname(__file__), 'client_secret.json')
 
-# Initialize shared dictionaries as empty dicts
-# These will be overwritten in the main process with Manager dicts
-app.tasks_progress = {}
-app.tasks_result = {}
+# Function: Get Credentials - Retrieves and refreshes credentials from the session
+def get_credentials():
+    """
+    Retrieves and refreshes Google OAuth2 credentials from the session.
+
+    Returns:
+        Credentials object or None if not authenticated.
+    """
+    if 'credentials' not in session:
+        return None
+
+    credentials_info = session['credentials']
+    credentials = Credentials(
+        token=credentials_info['token'],
+        refresh_token=credentials_info.get('refresh_token'),
+        token_uri=credentials_info['token_uri'],
+        client_id=credentials_info['client_id'],
+        client_secret=credentials_info['client_secret'],
+        scopes=credentials_info['scopes']
+    )
+
+    # Refresh credentials if expired
+    if credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+            session['credentials'] = credentials_to_dict(credentials)
+        except Exception as e:
+            session.clear()
+            return None
+    return credentials
 
 # ---------------------- Flask Routes ----------------------
 
@@ -85,13 +111,13 @@ def login():
         ],
         redirect_uri=redirect_uri
     )
-    
+
     # Generate the authorization URL and state
     authorization_url, state = flow.authorization_url(
         access_type='offline',
         prompt='consent'
     )
-    
+
     # Store the state in the session for security
     session['state'] = state
     return redirect(authorization_url)
@@ -157,14 +183,18 @@ def check_auth():
 def progress(task_id):
     """
     Retrieves the current progress and status of a specific PDF processing task.
-    
+
     Parameters:
         task_id (str): The unique identifier of the task.
-        
+
     Returns:
         JSON response containing progress percentage and status.
     """
-    progress = app.tasks_progress.get(task_id, None)
+    # Access shared dictionaries from app config
+    tasks_progress = current_app.config['tasks_progress']
+    tasks_result = current_app.config['tasks_result']
+
+    progress = tasks_progress.get(task_id, None)
     if progress is None:
         return jsonify({'status': 'unknown task'}), 404
 
@@ -174,7 +204,7 @@ def progress(task_id):
     }
 
     if response['progress'] >= 100:
-        result = app.tasks_result.get(task_id)
+        result = tasks_result.get(task_id)
         if result:
             response['status'] = 'completed'
             response['result'] = result
@@ -189,14 +219,18 @@ def progress(task_id):
 def process_result(task_id):
     """
     Retrieves the final result of a specific PDF processing task.
-    
+
     Parameters:
         task_id (str): The unique identifier of the task.
-        
+
     Returns:
         JSON response containing the result or a processing status.
     """
-    result = app.tasks_result.get(task_id)
+    # Access shared dictionaries from app config
+    tasks_progress = current_app.config['tasks_progress']
+    tasks_result = current_app.config['tasks_result']
+
+    result = tasks_result.get(task_id)
     if result:
         return jsonify(result)
     else:
@@ -211,60 +245,27 @@ app.register_blueprint(api_bp, url_prefix='/api')
 def serve_static(path):
     """
     Serves static files from the frontend directory.
-    
+
     Parameters:
         path (str): The path to the static file.
-        
+
     Returns:
         The requested static file.
     """
     return send_from_directory(app.static_folder, path)
 
-# Function: Get Credentials - Retrieves and refreshes credentials from the session
-def get_credentials():
-    """
-    Retrieves and refreshes Google OAuth2 credentials from the session.
-    
-    Returns:
-        Credentials object or None if not authenticated.
-    """
-    if 'credentials' not in session:
-        return None
-
-    credentials_info = session['credentials']
-    credentials = Credentials(
-        token=credentials_info['token'],
-        refresh_token=credentials_info.get('refresh_token'),
-        token_uri=credentials_info['token_uri'],
-        client_id=credentials_info['client_id'],
-        client_secret=credentials_info['client_secret'],
-        scopes=credentials_info['scopes']
-    )
-
-    # Refresh credentials if expired
-    if credentials.expired and credentials.refresh_token:
-        try:
-            credentials.refresh(Request())
-            session['credentials'] = credentials_to_dict(credentials)
-        except Exception as e:
-            session.clear()
-            return None
-    return credentials
-
 # Entry Point: Run the Flask application
 if __name__ == "__main__":
-    # Set the start method to 'spawn' to ensure compatibility on Windows
-    multiprocessing.set_start_method('spawn', force=True)
+    multiprocessing.set_start_method('spawn')  # Ensure 'spawn' is used on Windows
 
-    # Create a manager for sharing data between processes
+    # Start the manager for shared dictionaries
     manager = multiprocessing.Manager()
-    app.tasks_progress = manager.dict()  # Shared dictionary for progress tracking
-    app.tasks_result = manager.dict()    # Shared dictionary for task results
+    tasks_progress = manager.dict()
+    tasks_result = manager.dict()
+
+    # Store shared dictionaries in app config
+    app.config['tasks_progress'] = tasks_progress
+    app.config['tasks_result'] = tasks_result
 
     # Run the Flask app
-    app.run(host="0.0.0.0", port=8080, debug=True)
-else:
-    # In child processes, set tasks_progress and tasks_result to empty dicts
-    # This prevents AttributeError when child processes import app.py
-    app.tasks_progress = {}
-    app.tasks_result = {}
+    app.run(host="0.0.0.0", port=8080, debug=False)

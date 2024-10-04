@@ -5,6 +5,8 @@ import uuid
 import time
 import json
 from flask import Blueprint, request, jsonify, current_app
+from google.oauth2.credentials import Credentials
+from backend.drive_sheets import get_drive_service, get_sheets_service
 from werkzeug.utils import secure_filename
 from backend.pdf_handler import process_pdfs_in_folder
 from backend.drive_sheets import get_drive_service, get_sheets_service, get_folder_ids
@@ -63,13 +65,13 @@ def process_pdfs():
     # Generate a unique task ID for tracking
     task_id = f"task_{uuid.uuid4().hex}"
 
-    # Access the shared dictionaries from the main Flask app
-    tasks_progress = current_app.tasks_progress
-    tasks_result = current_app.tasks_result
+    # Access shared dictionaries from app config
+    tasks_progress = current_app.config['tasks_progress']
+    tasks_result = current_app.config['tasks_result']
 
     # Initialize progress and result for this task
-    progress_dict = tasks_progress[task_id] = {'progress': 0, 'status': 'starting'}
-    result_dict = tasks_result[task_id] = {}
+    tasks_progress[task_id] = {'progress': 0, 'status': 'starting'}
+    tasks_result[task_id] = {}
 
     # Start the PDF processing in a separate multiprocessing.Process
     try:
@@ -85,7 +87,7 @@ def process_pdfs():
                 main_folder_id,
                 task_id,
                 tasks_progress,
-                tasks_result
+                tasks_result  # Pass shared dictionaries to the child process
             )
         )
         process.start()
@@ -98,59 +100,86 @@ def process_pdfs():
     # Return the task_id to the client for progress tracking
     return jsonify({"status": "success", "task_id": task_id}), 200
 
+
 def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
-                credentials_json, folder_ids, main_folder_id, task_id, tasks_progress, tasks_result):
+                 credentials_json, folder_ids, main_folder_id, task_id,
+                 tasks_progress, tasks_result):
     """
     Target function for multiprocessing.Process.
+    Handles PDF processing task in a separate process.
     """
+    import json
     from google.oauth2.credentials import Credentials
     from backend.drive_sheets import get_drive_service, get_sheets_service
 
-    # Access the task-specific dictionaries
-    progress_dict = tasks_progress[task_id]
-    result_dict = tasks_result[task_id]
-
     try:
-        # Reconstruct credentials
-        credentials = Credentials.from_authorized_user_info(json.loads(credentials_json))
+        # Access or initialize progress and result dictionaries
+        progress_dict = tasks_progress.get(task_id, {'progress': 0, 'status': 'starting'})
+        result_dict = tasks_result.get(task_id, {'status': 'in_progress'})
+
+        # Reconstruct credentials from the provided JSON
+        credentials_info = json.loads(credentials_json)
+        credentials = Credentials(
+            token=credentials_info['token'],
+            refresh_token=credentials_info.get('refresh_token'),
+            token_uri=credentials_info['token_uri'],
+            client_id=credentials_info['client_id'],
+            client_secret=credentials_info['client_secret'],
+            scopes=credentials_info['scopes']
+        )
+
+        # Initialize Google Drive and Google Sheets services
         drive_service = get_drive_service(credentials)
         sheets_service = get_sheets_service(credentials)
 
-        # Create shared objects using the Manager from the main process
+        # Simulate some progress (e.g., 50% progress)
+        progress_dict['progress'] = 50
+        progress_dict['status'] = 'in_progress'
+        tasks_progress[task_id] = progress_dict
+
+        # Initialize the Manager and shared data structures
         manager = multiprocessing.Manager()
         pdf_info_list = manager.list()
         errors = manager.list()
         error_data = manager.list()
         error_files_set = manager.dict()
 
-        # Start processing the PDFs
+        # Perform PDF processing
         process_pdfs_in_folder(
-            folder_id,
-            excel_file_content,
-            excel_filename,
-            sheets_file_id,
-            drive_service,
-            sheets_service,
-            folder_ids,
-            main_folder_id,
-            task_id,
-            progress_dict,
-            result_dict,
-            pdf_info_list,
-            errors,
-            error_data,
-            error_files_set
+            folder_id=folder_id,
+            excel_file_content=excel_file_content,
+            excel_filename=excel_filename,
+            sheets_file_id=sheets_file_id,
+            drive_service=drive_service,
+            sheets_service=sheets_service,
+            folder_ids=folder_ids,
+            main_folder_id=main_folder_id,
+            task_id=task_id,
+            progress_dict=progress_dict,
+            result_dict=result_dict,
+            pdf_info_list=pdf_info_list,
+            errors=errors,
+            error_data=error_data,
+            error_files_set=error_files_set
         )
 
-        # Upon successful completion, update the progress and status
+        # Once processing is done, update progress and result status
         progress_dict['progress'] = 100
         progress_dict['status'] = 'completed'
+        result_dict['status'] = 'success'
+        result_dict['message'] = 'PDF processing completed successfully'
 
     except Exception as e:
-        # In case of any exception, update the result and progress dictionaries accordingly
-        result_dict['result'] = {'status': 'error', 'message': str(e)}
+        # In case of an error, update the task's progress and result with error details
         progress_dict['progress'] = 100
         progress_dict['status'] = 'error'
+        result_dict['status'] = 'error'
+        result_dict['message'] = str(e)
+
+    finally:
+        # Ensure final updates are made to the shared dictionaries
+        tasks_progress[task_id] = progress_dict
+        tasks_result[task_id] = result_dict
 
 
 @api_bp.route('/progress/<task_id>', methods=['GET'])
@@ -158,9 +187,9 @@ def get_progress(task_id):
     """
     Endpoint to retrieve the progress of a PDF processing task.
     """
-    # Access the shared dictionaries from the main Flask app
-    tasks_progress = current_app.tasks_progress
-    tasks_result = current_app.tasks_result
+    # Access shared dictionaries from app config
+    tasks_progress = current_app.config['tasks_progress']
+    tasks_result = current_app.config['tasks_result']
 
     # Retrieve the progress information for the given task_id
     progress = tasks_progress.get(task_id)
@@ -184,3 +213,21 @@ def get_progress(task_id):
             response['result'] = {'status': 'error', 'message': 'No result available.'}
 
     return jsonify(response), 200
+
+
+@api_bp.route('/result/<task_id>', methods=['GET'])
+def get_result(task_id):
+    """
+    Endpoint to retrieve the final result of a PDF processing task.
+    """
+    # Access shared dictionaries from app config
+    tasks_progress = current_app.config['tasks_progress']
+    tasks_result = current_app.config['tasks_result']
+
+    # Retrieve the result for the given task_id
+    result = tasks_result.get(task_id)
+
+    if result is None:
+        return jsonify({'status': 'unknown task'}), 404
+
+    return jsonify(result), 200
