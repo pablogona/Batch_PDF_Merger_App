@@ -313,7 +313,18 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
             office_col_idx = len(df.columns) - 1  # Get the new index
             logger.info("Column 'OFICINA DE CORRESPONDENCIA' was missing and has been added.")
 
-        # Add normalized name column for comparison
+        # Push the updated headers back to the Google Sheet
+        header_range = f"'{sheet_name}'!A1:{col_idx_to_letter(len(df.columns) - 1)}1"
+        header_values = [list(df.columns)]
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=header_range,
+            valueInputOption='RAW',
+            body={'values': header_values}
+        ).execute()
+        logger.info(f"Updated headers in the sheet: {header_values}")
+
+        # Add normalized name column for comparison, but don't add it to the sheet
         df['Normalized_Name'] = df['NOMBRE_CTE'].apply(normalize_text)
         client_norm = normalize_text(client_name)
 
@@ -363,6 +374,9 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
                         body=body
                     ).execute()
                     logger.info(f"Successfully updated range '{update['range']}' for client '{client_name}'.")
+
+            # Drop the 'Normalized_Name' column to avoid sending it to the Google Sheet
+            df = df.drop(columns=['Normalized_Name'])
 
             return client_unique  # Return CLIENTE_UNICO to use for naming the PDF
         else:
