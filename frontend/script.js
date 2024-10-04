@@ -123,7 +123,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Update progress message based on the progress value
                 if (progress < 10) {
                     progressMessage.textContent = 'Inicializando...';
-                } else if (progress < 20) {
+                } else if (progress < 30) {
                     progressMessage.textContent = 'Descargando PDFs...';
                 } else if (progress < 60) {
                     progressMessage.textContent = 'Procesando PDFs...';
