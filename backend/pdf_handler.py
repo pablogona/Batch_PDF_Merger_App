@@ -21,6 +21,7 @@ from backend.drive_sheets import (
 from backend.utils import normalize_text
 from backend.redis_client import redis_client  # Use Redis for progress tracking
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from collections import defaultdict
 import concurrent.futures
 import pandas as pd  # Ensure pandas is imported
 import unicodedata  # For text normalization
@@ -502,11 +503,22 @@ def classify_pdf(pdf_content, filename):
 
 def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_files_set):
     """
-    Pairs ACUSE and DEMANDA PDFs based on the extracted names and uploads unmatched PDFs to 'PDFs con Error'.
-    Also collects error data for unmatched PDFs.
+    Pairs ACUSE and DEMANDA PDFs based on the extracted names and uploads unmatched or duplicate PDFs to 'PDFs con Error'.
+    Also collects error data for unmatched or duplicate PDFs.
+
+    Args:
+        pdf_info_list (list): List of dictionaries containing PDF information.
+        error_folder_id (str): Google Drive folder ID for 'PDFs con Error'.
+        drive_service: Google Drive service instance.
+        error_data (list): List to append error entries for 'PDFs con Error.xlsx'.
+        error_files_set (dict): Dictionary to track already processed error files.
+
+    Returns:
+        tuple: A tuple containing the list of valid pairs and a list of errors.
     """
-    acuse_dict = {}
-    demanda_dict = {}
+    # Use defaultdict to handle multiple PDFs per name
+    acuse_dict = defaultdict(list)
+    demanda_dict = defaultdict(list)
     pairs = []
     errors = []
 
@@ -515,15 +527,15 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
         pdf_type = pdf_info['info'].get('type')  # Ensure the key is 'type'
         name = pdf_info['info'].get('name')
         if pdf_type == 'ACUSE' and name:
-            acuse_dict[name] = pdf_info
+            acuse_dict[name].append(pdf_info)
         elif pdf_type == 'DEMANDA' and name:
-            demanda_dict[name] = pdf_info
+            demanda_dict[name].append(pdf_info)
         else:
             # If type is missing but name is present, we can try to pair it
             if name:
                 # Decide where to place it based on available info
                 # For simplicity, treat it as ACUSE
-                acuse_dict[name] = pdf_info
+                acuse_dict[name].append(pdf_info)
             else:
                 if pdf_info['file_name'] not in error_files_set:
                     errors.append({
@@ -533,69 +545,239 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_files_set[pdf_info['file_name']] = True
                     logger.warning(f"Unknown or missing PDF type and name for {pdf_info['file_name']}")
 
+    # Identify duplicate names
+    duplicate_names = set()
+
+    # Check for duplicate ACUSEs
+    for name, acuse_list in acuse_dict.items():
+        if len(acuse_list) > 1:
+            duplicate_names.add(name)
+            for pdf_info in acuse_list:
+                pdf_filename = pdf_info['file_name']
+                if pdf_filename not in error_files_set:
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"Se encontraron múltiples ACUSEs para el nombre: {name}"
+                    })
+                    error_files_set[pdf_filename] = True
+                    logger.warning(f"Duplicate ACUSE found for name '{name}' in file '{pdf_filename}'")
+                    
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': name,
+                        'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
+                        'ERROR': f"Se encontraron múltiples ACUSEs para el nombre: {name}"
+                    }
+                    error_data.append(error_entry)
+                    
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(
+                            io.BytesIO(pdf_info['content']),
+                            error_folder_id,
+                            drive_service,
+                            pdf_filename
+                        )
+                        logger.info(f"Uploaded duplicate ACUSE '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading duplicate ACUSE '{pdf_filename}' to 'PDFs con Error': {e}")
+
+    # Check for duplicate DEMANDAs
+    for name, demanda_list in demanda_dict.items():
+        if len(demanda_list) > 1:
+            duplicate_names.add(name)
+            for pdf_info in demanda_list:
+                pdf_filename = pdf_info['file_name']
+                if pdf_filename not in error_files_set:
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"Se encontraron múltiples DEMANDAs para el nombre: {name}"
+                    })
+                    error_files_set[pdf_filename] = True
+                    logger.warning(f"Duplicate DEMANDA found for name '{name}' in file '{pdf_filename}'")
+                    
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': name,
+                        'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
+                        'ERROR': f"Se encontraron múltiples DEMANDAs para el nombre: {name}"
+                    }
+                    error_data.append(error_entry)
+                    
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(
+                            io.BytesIO(pdf_info['content']),
+                            error_folder_id,
+                            drive_service,
+                            pdf_filename
+                        )
+                        logger.info(f"Uploaded duplicate DEMANDA '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading duplicate DEMANDA '{pdf_filename}' to 'PDFs con Error': {e}")
+
+    # Exclude duplicate names from pairing
+    names_to_pair = set(acuse_dict.keys()) & set(demanda_dict.keys())
+    names_to_pair -= duplicate_names
+
     # Pair PDFs based on the name
-    for name in demanda_dict.keys():
-        if name in acuse_dict:
+    for name in names_to_pair:
+        acuse_list = acuse_dict[name]
+        demanda_list = demanda_dict[name]
+        
+        # Since duplicates are already handled, there should be exactly one ACUSE and one DEMANDA
+        if len(acuse_list) == 1 and len(demanda_list) == 1:
+            acuse_pdf = acuse_list[0]
+            demanda_pdf = demanda_list[0]
+            
             # Merge info from both DEMANDA and ACUSE
-            combined_info = {**demanda_dict[name]['info'], **acuse_dict[name]['info']}
+            combined_info = {**demanda_pdf['info'], **acuse_pdf['info']}
             pairs.append({
                 'name': name,
-                'pdfs': [acuse_dict[name]['content'], demanda_dict[name]['content']],
+                'pdfs': [acuse_pdf['content'], demanda_pdf['content']],
                 'info': combined_info,
-                'file_name': demanda_dict[name]['file_name']
+                'file_name': demanda_pdf['file_name']  # Assuming DEMANDA is the primary file
             })
         else:
-            # DEMANDA without matching ACUSE
-            pdf_filename = demanda_dict[name]['file_name']
-            if pdf_filename not in error_files_set:
-                errors.append({
-                    'file_name': pdf_filename,
-                    'message': f"No se encontró un ACUSE correspondiente para DEMANDA: {name}"
-                })
-                logger.warning(f"No matching ACUSE found for DEMANDA: {name}")
-                # Collect error data
-                error_entry = {
-                    'DOCUMENTO': pdf_filename,
-                    'NOMBRE_CTE': demanda_dict[name]['info'].get('name', ''),
-                    'FOLIO DE REGISTRO': '',
-                    'OFICINA DE CORRESPONDENCIA': '',
-                    'ERROR': f"No se encontró un ACUSE correspondiente para DEMANDA: {name}"
-                }
-                error_data.append(error_entry)
-                error_files_set[pdf_filename] = True
-                # Optionally, upload DEMANDA to 'PDFs con Error'
-                try:
-                    upload_file_to_drive(io.BytesIO(demanda_dict[name]['content']), error_folder_id, drive_service, pdf_filename)
-                    logger.info(f"Uploaded unmatched DEMANDA '{pdf_filename}' to 'PDFs con Error'")
-                except Exception as e:
-                    logger.error(f"Error uploading DEMANDA '{pdf_filename}' to 'PDFs con Error': {e}")
+            # This should not happen as duplicates are already handled
+            logger.error(f"Unexpected number of ACUSEs or DEMANDAs for name '{name}'")
+            for pdf_info in acuse_list:
+                pdf_filename = pdf_info['file_name']
+                if pdf_filename not in error_files_set:
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"Cantidad inesperada de ACUSEs para el nombre: {name}"
+                    })
+                    error_files_set[pdf_filename] = True
+                    logger.warning(f"Unexpected number of ACUSEs for name '{name}' in file '{pdf_filename}'")
+                    
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': name,
+                        'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
+                        'ERROR': f"Cantidad inesperada de ACUSEs para el nombre: {name}"
+                    }
+                    error_data.append(error_entry)
+                    
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(
+                            io.BytesIO(pdf_info['content']),
+                            error_folder_id,
+                            drive_service,
+                            pdf_filename
+                        )
+                        logger.info(f"Uploaded unexpected ACUSE '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading unexpected ACUSE '{pdf_filename}' to 'PDFs con Error': {e}")
 
-    for name in acuse_dict.keys():
-        if name not in demanda_dict:
-            # ACUSE without matching DEMANDA
-            pdf_filename = acuse_dict[name]['file_name']
-            if pdf_filename not in error_files_set:
-                errors.append({
-                    'file_name': pdf_filename,
-                    'message': f"No se encontró una DEMANDA correspondiente para ACUSE: {name}"
-                })
-                logger.warning(f"No matching DEMANDA found for ACUSE: {name}")
-                # Collect error data
-                error_entry = {
-                    'DOCUMENTO': pdf_filename,
-                    'NOMBRE_CTE': acuse_dict[name]['info'].get('name', ''),
-                    'FOLIO DE REGISTRO': acuse_dict[name]['info'].get('folio_number', ''),
-                    'OFICINA DE CORRESPONDENCIA': acuse_dict[name]['info'].get('oficina', ''),
-                    'ERROR': f"No se encontró una DEMANDA correspondiente para ACUSE: {name}"
-                }
-                error_data.append(error_entry)
-                error_files_set[pdf_filename] = True
-                # Optionally, upload ACUSE to 'PDFs con Error'
-                try:
-                    upload_file_to_drive(io.BytesIO(acuse_dict[name]['content']), error_folder_id, drive_service, pdf_filename)
-                    logger.info(f"Uploaded unmatched ACUSE '{pdf_filename}' to 'PDFs con Error'")
-                except Exception as e:
-                    logger.error(f"Error uploading ACUSE '{pdf_filename}' to 'PDFs con Error': {e}")
+            for pdf_info in demanda_list:
+                pdf_filename = pdf_info['file_name']
+                if pdf_filename not in error_files_set:
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"Cantidad inesperada de DEMANDAs para el nombre: {name}"
+                    })
+                    error_files_set[pdf_filename] = True
+                    logger.warning(f"Unexpected number of DEMANDAs for name '{name}' in file '{pdf_filename}'")
+                    
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': name,
+                        'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
+                        'ERROR': f"Cantidad inesperada de DEMANDAs para el nombre: {name}"
+                    }
+                    error_data.append(error_entry)
+                    
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(
+                            io.BytesIO(pdf_info['content']),
+                            error_folder_id,
+                            drive_service,
+                            pdf_filename
+                        )
+                        logger.info(f"Uploaded unexpected DEMANDA '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading unexpected DEMANDA '{pdf_filename}' to 'PDFs con Error': {e}")
+
+    # Handle DEMANDAs without matching ACUSEs
+    for name, demanda_list in demanda_dict.items():
+        if name not in acuse_dict and name not in duplicate_names:
+            for demanda_pdf in demanda_list:
+                pdf_filename = demanda_pdf['file_name']
+                if pdf_filename not in error_files_set:
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"No se encontró un ACUSE correspondiente para DEMANDA: {name}"
+                    })
+                    logger.warning(f"No matching ACUSE found for DEMANDA: {name} in file '{pdf_filename}'")
+                    
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': demanda_pdf['info'].get('name', ''),
+                        'FOLIO DE REGISTRO': '',
+                        'OFICINA DE CORRESPONDENCIA': '',
+                        'ERROR': f"No se encontró un ACUSE correspondiente para DEMANDA: {name}"
+                    }
+                    error_data.append(error_entry)
+                    error_files_set[pdf_filename] = True
+                    
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(
+                            io.BytesIO(demanda_pdf['content']),
+                            error_folder_id,
+                            drive_service,
+                            pdf_filename
+                        )
+                        logger.info(f"Uploaded unmatched DEMANDA '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading DEMANDA '{pdf_filename}' to 'PDFs con Error': {e}")
+
+    # Handle ACUSEs without matching DEMANDAs
+    for name, acuse_list in acuse_dict.items():
+        if name not in demanda_dict and name not in duplicate_names:
+            for acuse_pdf in acuse_list:
+                pdf_filename = acuse_pdf['file_name']
+                if pdf_filename not in error_files_set:
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"No se encontró una DEMANDA correspondiente para ACUSE: {name}"
+                    })
+                    logger.warning(f"No matching DEMANDA found for ACUSE: {name} in file '{pdf_filename}'")
+                    
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': acuse_pdf['info'].get('name', ''),
+                        'FOLIO DE REGISTRO': acuse_pdf['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': acuse_pdf['info'].get('oficina', ''),
+                        'ERROR': f"No se encontró una DEMANDA correspondiente para ACUSE: {name}"
+                    }
+                    error_data.append(error_entry)
+                    error_files_set[pdf_filename] = True
+                    
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(
+                            io.BytesIO(acuse_pdf['content']),
+                            error_folder_id,
+                            drive_service,
+                            pdf_filename
+                        )
+                        logger.info(f"Uploaded unmatched ACUSE '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading ACUSE '{pdf_filename}' to 'PDFs con Error': {e}")
 
     return pairs, errors
 
