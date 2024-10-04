@@ -29,7 +29,7 @@ def process_pdfs():
     """
     credentials = get_credentials()
     if not credentials:
-        return jsonify({"status": "error", "message": "User not authenticated"}), 401
+        return jsonify({"status": "error", "message": "Usuario no autenticado"}), 401
 
     drive_service = get_drive_service(credentials)
     sheets_service = get_sheets_service(credentials)
@@ -44,7 +44,7 @@ def process_pdfs():
     folder_id = request.form.get('folderId')  # Folder ID from Google Drive
 
     if not (excel_file or sheets_file_id) or not folder_id:
-        return jsonify({"status": "error", "message": "Missing files or folder ID"}), 400
+        return jsonify({"status": "error", "message": "Faltan archivos o ID de carpeta"}), 400
 
     # Read Excel file into memory if provided
     if excel_file:
@@ -95,7 +95,7 @@ def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
         redis_client.set(f"progress:{task_id}", 100)
     except Exception as e:
         # Handle exceptions and store error result
-        redis_client.set(f"result:{task_id}", json.dumps({'status': 'error', 'message': str(e)}))
+        redis_client.set(f"result:{task_id}", json.dumps({'status': 'error', 'message': f'Ocurrió un error: {str(e)}'}))
         # Ensure progress is marked as complete
         redis_client.set(f"progress:{task_id}", 100)
 

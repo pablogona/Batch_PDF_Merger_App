@@ -271,13 +271,14 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             df_errors = pd.DataFrame(error_data, columns=[
                 'DOCUMENTO',
                 'NOMBRE_CTE',
-                'CLIENTE_UNICO',
                 'FOLIO DE REGISTRO',
-                'OFICINA DE CORRESPONDENCIA'
+                'OFICINA DE CORRESPONDENCIA',
+                'ERROR'
             ])
 
-            # Ensure 'CLIENTE_UNICO' is empty
-            df_errors['CLIENTE_UNICO'] = ''
+            # Remove the 'CLIENTE_UNICO' column if it exists
+            if 'CLIENTE_UNICO' in df_errors.columns:
+                df_errors.drop(columns=['CLIENTE_UNICO'], inplace=True)
 
             # Remove duplicate entries based on 'DOCUMENTO'
             df_errors.drop_duplicates(subset=['DOCUMENTO'], inplace=True)
@@ -354,9 +355,9 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             partial_info = {
                 'DOCUMENTO': pdf_filename,
                 'NOMBRE_CTE': '',
-                'CLIENTE_UNICO': '',
                 'FOLIO DE REGISTRO': '',
-                'OFICINA DE CORRESPONDENCIA': ''
+                'OFICINA DE CORRESPONDENCIA': '',
+                'ERROR': "No se pudo clasificar el PDF."
             }
             # Add to error_data if not already added
             if pdf_filename not in error_files_set:
@@ -364,7 +365,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 error_files_set[pdf_filename] = True
                 errors.append({
                     'file_name': pdf_filename,
-                    'message': "Unable to classify PDF."
+                    'message': "No se pudo clasificar el PDF."
                 })
             # Upload to 'PDFs con Error'
             try:
@@ -380,9 +381,9 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             partial_info = {
                 'DOCUMENTO': pdf_filename,
                 'NOMBRE_CTE': '',
-                'CLIENTE_UNICO': '',
                 'FOLIO DE REGISTRO': '',
-                'OFICINA DE CORRESPONDENCIA': ''
+                'OFICINA DE CORRESPONDENCIA': '',
+                'ERROR': "No se pudo extraer información válida del PDF."
             }
             # Add to error_data if not already added
             if pdf_filename not in error_files_set:
@@ -390,7 +391,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 error_files_set[pdf_filename] = True
                 errors.append({
                     'file_name': pdf_filename,
-                    'message': "Unable to extract valid information from PDF."
+                    'message': "No se pudo extraer información válida del PDF."
                 })
             # Upload to 'PDFs con Error'
             try:
@@ -423,16 +424,16 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             partial_info = {
                 'DOCUMENTO': pdf_filename,
                 'NOMBRE_CTE': info.get('name', ''),
-                'CLIENTE_UNICO': '',
                 'FOLIO DE REGISTRO': info.get('folio_number', ''),
-                'OFICINA DE CORRESPONDENCIA': info.get('oficina', '')
+                'OFICINA DE CORRESPONDENCIA': info.get('oficina', ''),
+                'ERROR': f"Faltan campos críticos: {', '.join(missing_fields)}"
             }
             if pdf_filename not in error_files_set:
                 error_data.append(partial_info)
                 error_files_set[pdf_filename] = True
                 errors.append({
                     'file_name': pdf_filename,
-                    'message': f"Missing critical fields: {', '.join(missing_fields)}"
+                    'message': f"Faltan campos críticos: {', '.join(missing_fields)}"
                 })
             # Upload to 'PDFs con Error'
             try:
@@ -464,9 +465,9 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
         partial_info = {
             'DOCUMENTO': pdf_filename,
             'NOMBRE_CTE': '',
-            'CLIENTE_UNICO': '',
             'FOLIO DE REGISTRO': '',
-            'OFICINA DE CORRESPONDENCIA': ''
+            'OFICINA DE CORRESPONDENCIA': '',
+            'ERROR': str(e)
         }
         if pdf_filename not in error_files_set:
             error_data.append(partial_info)
@@ -527,7 +528,7 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                 if pdf_info['file_name'] not in error_files_set:
                     errors.append({
                         'file_name': pdf_info['file_name'],
-                        'message': f"Unknown or missing PDF type and name for {pdf_info['file_name']}"
+                        'message': f"Tipo de PDF y nombre desconocidos o faltantes para {pdf_info['file_name']}"
                     })
                     error_files_set[pdf_info['file_name']] = True
                     logger.warning(f"Unknown or missing PDF type and name for {pdf_info['file_name']}")
@@ -549,16 +550,16 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
             if pdf_filename not in error_files_set:
                 errors.append({
                     'file_name': pdf_filename,
-                    'message': f"No matching ACUSE found for DEMANDA: {name}"
+                    'message': f"No se encontró un ACUSE correspondiente para DEMANDA: {name}"
                 })
                 logger.warning(f"No matching ACUSE found for DEMANDA: {name}")
                 # Collect error data
                 error_entry = {
                     'DOCUMENTO': pdf_filename,
                     'NOMBRE_CTE': demanda_dict[name]['info'].get('name', ''),
-                    'CLIENTE_UNICO': '',
                     'FOLIO DE REGISTRO': '',
-                    'OFICINA DE CORRESPONDENCIA': ''
+                    'OFICINA DE CORRESPONDENCIA': '',
+                    'ERROR': f"No se encontró un ACUSE correspondiente para DEMANDA: {name}"
                 }
                 error_data.append(error_entry)
                 error_files_set[pdf_filename] = True
@@ -576,16 +577,16 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
             if pdf_filename not in error_files_set:
                 errors.append({
                     'file_name': pdf_filename,
-                    'message': f"No matching DEMANDA found for ACUSE: {name}"
+                    'message': f"No se encontró una DEMANDA correspondiente para ACUSE: {name}"
                 })
                 logger.warning(f"No matching DEMANDA found for ACUSE: {name}")
                 # Collect error data
                 error_entry = {
                     'DOCUMENTO': pdf_filename,
                     'NOMBRE_CTE': acuse_dict[name]['info'].get('name', ''),
-                    'CLIENTE_UNICO': '',
                     'FOLIO DE REGISTRO': acuse_dict[name]['info'].get('folio_number', ''),
-                    'OFICINA DE CORRESPONDENCIA': acuse_dict[name]['info'].get('oficina', '')
+                    'OFICINA DE CORRESPONDENCIA': acuse_dict[name]['info'].get('oficina', ''),
+                    'ERROR': f"No se encontró una DEMANDA correspondiente para ACUSE: {name}"
                 }
                 error_data.append(error_entry)
                 error_files_set[pdf_filename] = True
@@ -711,7 +712,7 @@ def extract_acuse_information(pdf_stream):
         # Log the extracted data
         logger.info(f"Extracted - Oficina: {extracted_oficina}, Folio: {extracted_folio}, Nombre: {extracted_name}")
 
-        # If no name is found, return None (error handling)
+        # If no name is found, return partial info with empty 'name' field
         if not extracted_name:
             logger.warning("No name match found in ACUSE PDF.")
             # Return the partial info
