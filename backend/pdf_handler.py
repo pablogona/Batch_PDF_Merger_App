@@ -754,10 +754,12 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
             acuse_pdf = acuse_list[0]
             demanda_pdf = demanda_list[0]
 
-            # Merge info from both DEMANDA and ACUSE
-            combined_info = {**demanda_pdf['info'], **acuse_pdf['info']}
+            # Merge info from both DEMANDA and ACUSE, ensuring the name from DEMANDA is retained
+            combined_info = {**acuse_pdf['info'], **demanda_pdf['info']}  # Ensure DEMANDA info overrides ACUSE
+            combined_info['name'] = demanda_pdf['info']['name']  # Explicitly set the correct name from DEMANDA
+
             pairs.append({
-                'name': name,
+                'name': combined_info['name'],  # Use the correct name for final processing
                 'pdfs': [acuse_pdf['content'], demanda_pdf['content']],
                 'info': combined_info,
                 'file_name': demanda_pdf['file_name'],  # Assuming DEMANDA is the primary file
@@ -901,6 +903,7 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                         logger.error(f"Error uploading ACUSE '{pdf_filename}' to 'PDFs con Error': {e}")
 
     return pairs, errors
+
 
 def merge_pdfs(pdfs):
     """
