@@ -229,16 +229,19 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         if total_pairs == 0:
             total_pairs = 1  # Prevent division by zero
         processed_pairs = 0
+        pairs_attempted = 0
 
         # Initialize list to collect batch updates for Google Sheets
         batch_updates = []
 
         for pair in pairs:
+            pairs_attempted += 1  # Increment pairs_attempted for each pair processed
             merged_pdf = merge_pdfs([pair['pdfs'][0], pair['pdfs'][1]])
+
             if merged_pdf:
                 client_unique = update_google_sheet(
                     excel_file_id,
-                    pair['name'],
+                    pair['info']['name'],
                     pair['info'].get('folio_number'),
                     pair['info'].get('oficina'),
                     sheets_service,
@@ -250,23 +253,66 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                     file_name = f"{client_unique} {pair['info']['name']}.pdf"
                     upload_file_to_drive(merged_pdf, folder_ids['PDFs Unificados'], drive_service, file_name)
                     logger.info(f"Merged PDF for {pair['info']['name']} uploaded to 'PDFs Unificados'")
-                else:
-                    errors.append({
-                        'file_name': pair['file_name'],
-                        'message': f"Client '{pair['info']['name']}' not found in sheet."
-                    })
-                    logger.warning(f"Client '{pair['info']['name']}' not found in sheet.")
-            else:
-                errors.append({
-                    'file_name': pair['file_name'],
-                    'message': f"Failed to merge PDFs for {pair['info']['name']}"
-                })
-                logger.warning(f"Failed to merge PDFs for {pair['info']['name']}")
 
-            processed_pairs += 1
-            progress_value = 70 + ((processed_pairs / total_pairs) * 29)  # Scale to 70-99%
+                    # Only increment processed_pairs if the pair was successfully processed
+                    processed_pairs += 1
+                else:
+                    # Client not found in sheet
+                    for pdf_content, pdf_filename in zip(pair['pdfs'], pair['pdf_filenames']):
+                        errors.append({
+                            'file_name': pdf_filename,
+                            'message': f"Client '{pair['info']['name']}' no encontrado en excel."
+                        })
+                        logger.warning(f"Client '{pair['info']['name']}' no encontrado en excel.")
+
+                        # Collect error data
+                        error_entry = {
+                            'DOCUMENTO': pdf_filename,
+                            'NOMBRE_CTE': pair['info']['name'],
+                            'FOLIO DE REGISTRO': pair['info'].get('folio_number', ''),
+                            'OFICINA DE CORRESPONDENCIA': pair['info'].get('oficina', ''),
+                            'ERROR': f"Client '{pair['info']['name']}' no encontrado en excel."
+                        }
+                        error_data.append(error_entry)
+                        error_files_set[pdf_filename] = True
+
+                        # Upload to 'PDFs con Error' folder
+                        try:
+                            upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
+                            logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
+                        except Exception as e:
+                            logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+            else:
+                # Failed to merge PDFs
+                for pdf_content, pdf_filename in zip(pair['pdfs'], pair['pdf_filenames']):
+                    errors.append({
+                        'file_name': pdf_filename,
+                        'message': f"Failed to merge PDFs for {pair['info']['name']}"
+                    })
+                    logger.warning(f"Failed to merge PDFs for {pair['info']['name']}")
+
+                    # Collect error data
+                    error_entry = {
+                        'DOCUMENTO': pdf_filename,
+                        'NOMBRE_CTE': pair['info']['name'],
+                        'FOLIO DE REGISTRO': pair['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': pair['info'].get('oficina', ''),
+                        'ERROR': f"Failed to merge PDFs for {pair['info']['name']}"
+                    }
+                    error_data.append(error_entry)
+                    error_files_set[pdf_filename] = True
+
+                    # Upload to 'PDFs con Error' folder
+                    try:
+                        upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
+                        logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
+                    except Exception as e:
+                        logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+
+            # Update progress after each pair attempted
+            progress_value = 70 + ((pairs_attempted / total_pairs) * 29)  # Scale to 70-99%
             redis_client.set(f"progress:{task_id}", progress_value)
-            logger.info(f"Processed pair {processed_pairs}/{total_pairs}. Progress: {progress_value:.1f}%")
+            logger.info(f"Attempted pair {pairs_attempted}/{total_pairs}. Progress: {progress_value:.1f}%")
 
         # After processing all pairs, perform batch update to Google Sheets
         if batch_updates:
@@ -285,12 +331,8 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 'ERROR'
             ])
 
-            # Remove the 'CLIENTE_UNICO' column if it exists
-            if 'CLIENTE_UNICO' in df_errors.columns:
-                df_errors.drop(columns=['CLIENTE_UNICO'], inplace=True)
-
-            # Remove duplicate entries based on 'DOCUMENTO'
-            df_errors.drop_duplicates(subset=['DOCUMENTO'], inplace=True)
+            # Remove duplicate entries based on 'DOCUMENTO' and 'ERROR' to avoid duplicates
+            df_errors.drop_duplicates(subset=['DOCUMENTO', 'ERROR'], inplace=True)
 
             # Save DataFrame to Excel file in memory
             excel_buffer = io.BytesIO()
@@ -316,7 +358,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         # Prepare the final result
         result = {
             'status': 'success',
-            'message': f'Processed {len(pairs)} pairs with {len(errors)} errors.',
+            'message': f'Processed {processed_pairs} pairs with {len(errors)} errors.',
             'errors': errors
         }
 
@@ -685,8 +727,8 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
-                        'FOLIO DE REGISTRO': demanda_pdf['info'].get('folio_number', ''),
-                        'OFICINA DE CORRESPONDENCIA': demanda_pdf['info'].get('oficina', ''),
+                        'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
+                        'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
                         'ERROR': f"Se encontró una DEMANDA para el nombre con múltiples ACUSEs: {name}"
                     }
                     error_data.append(error_entry)
@@ -718,7 +760,8 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                 'name': name,
                 'pdfs': [acuse_pdf['content'], demanda_pdf['content']],
                 'info': combined_info,
-                'file_name': demanda_pdf['file_name']  # Assuming DEMANDA is the primary file
+                'file_name': demanda_pdf['file_name'],  # Assuming DEMANDA is the primary file
+                'pdf_filenames': [acuse_pdf['file_name'], demanda_pdf['file_name']]
             })
         else:
             # This should not happen as duplicates are already handled
