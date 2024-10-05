@@ -246,21 +246,22 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 )
 
                 if client_unique:
-                    file_name = f"{client_unique} {pair['name']}.pdf"
+                    # Use original name for the final file name
+                    file_name = f"{client_unique} {pair['info']['name']}.pdf"
                     upload_file_to_drive(merged_pdf, folder_ids['PDFs Unificados'], drive_service, file_name)
-                    logger.info(f"Merged PDF for {pair['name']} uploaded to 'PDFs Unificados'")
+                    logger.info(f"Merged PDF for {pair['info']['name']} uploaded to 'PDFs Unificados'")
                 else:
                     errors.append({
                         'file_name': pair['file_name'],
-                        'message': f"Client '{pair['name']}' not found in sheet."
+                        'message': f"Client '{pair['info']['name']}' not found in sheet."
                     })
-                    logger.warning(f"Client '{pair['name']}' not found in sheet.")
+                    logger.warning(f"Client '{pair['info']['name']}' not found in sheet.")
             else:
                 errors.append({
                     'file_name': pair['file_name'],
-                    'message': f"Failed to merge PDFs for {pair['name']}"
+                    'message': f"Failed to merge PDFs for {pair['info']['name']}"
                 })
-                logger.warning(f"Failed to merge PDFs for {pair['name']}")
+                logger.warning(f"Failed to merge PDFs for {pair['info']['name']}")
 
             processed_pairs += 1
             progress_value = 70 + ((processed_pairs / total_pairs) * 29)  # Scale to 70-99%
@@ -413,7 +414,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
         logger.debug(f"Extracted info before normalization: {info}")
 
         # Normalize the extracted name
-        info['name'] = normalize_name(info.get('name', ''))
+        info['normalized_name'] = normalize_name(info.get('name', ''))
 
         # Log the info after normalization
         logger.debug(f"Info after normalization: {info}")
@@ -532,15 +533,15 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
     # Separate PDFs into ACUSE and DEMANDA
     for pdf_info in pdf_info_list:
         pdf_type = pdf_info['info'].get('type')  # 'ACUSE' or 'DEMANDA'
-        name = pdf_info['info'].get('name')
-        if pdf_type == 'ACUSE' and name:
-            acuse_dict[name].append(pdf_info)
-        elif pdf_type == 'DEMANDA' and name:
-            demanda_dict[name].append(pdf_info)
+        normalized_name = pdf_info['info'].get('normalized_name')
+        if pdf_type == 'ACUSE' and normalized_name:
+            acuse_dict[normalized_name].append(pdf_info)
+        elif pdf_type == 'DEMANDA' and normalized_name:
+            demanda_dict[normalized_name].append(pdf_info)
         else:
             # If type is missing but name is present, treat it as ACUSE
-            if name:
-                acuse_dict[name].append(pdf_info)
+            if normalized_name:
+                acuse_dict[normalized_name].append(pdf_info)
             else:
                 if pdf_info['file_name'] not in error_files_set:
                     errors.append({
@@ -894,9 +895,9 @@ def extract_demanda_information(pdf_stream):
         # Log the cleaned text for debugging
         logger.info(f"Cleaned DEMANDA Text:\n{text}")
 
-        # Adjusted regex pattern to match the text structure
+        # Adjusted regex pattern to match the text structure (with dot handling for names like MA. DEL REFUGIO)
         nombre_match = re.search(
-            r'VS\s*([A-ZÁÉÍÓÚÑÜ\s]+)\s*MEDIOS PREPARATORIOS',
+            r'VS\s*([A-ZÁÉÍÓÚÑÜ\s.]+)\s*MEDIOS PREPARATORIOS',
             text,
             re.UNICODE | re.IGNORECASE
         )
@@ -904,7 +905,7 @@ def extract_demanda_information(pdf_stream):
         if not nombre_match:
             # Try alternative patterns if the first one doesn't match
             nombre_match = re.search(
-                r'VS\s*([A-ZÁÉÍÓÚÑÜ\s]+)\s*ESCRITO INICIAL',
+                r'VS\s*([A-ZÁÉÍÓÚÑÜ\s.]+)\s*ESCRITO INICIAL',
                 text,
                 re.UNICODE | re.IGNORECASE
             )
@@ -947,9 +948,9 @@ def extract_acuse_information(pdf_stream):
         # Log the extracted text for debugging
         logger.info(f"Extracted Text from ACUSE PDF:\n{text}")
 
-        # Extract 'nombre' using adjusted regex to exclude 'ANEXOS'
+        # Extract 'nombre' using adjusted regex to exclude 'ANEXOS' and allow dots in names
         nombre_match = re.search(
-            r'BAZ\s*VS\s*([\wÁÉÍÓÚÑÜáéíóúñü\s]+?)(?=\s*ANEXOS\.pdf|\s*ANEXOS\s|\.pdf|\s*$)',
+            r'BAZ\s*VS\s*([\wÁÉÍÓÚÑÜáéíóúñü\s.]+?)(?=\s*ANEXOS\.pdf|\s*ANEXOS\s|\.pdf|\s*$)',
             text,
             re.UNICODE | re.IGNORECASE
         )

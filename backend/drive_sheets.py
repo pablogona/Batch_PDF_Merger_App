@@ -213,7 +213,7 @@ def read_sheet_data(sheet_id, sheets_service):
 
         result = sheets_service.spreadsheets().values().get(
             spreadsheetId=sheet_id,
-            range=f"'{sheet_name}'!A1:Z1000"  # Adjust range as needed
+            range=f"'{sheet_name}'!A1:Z"  # Adjust range as needed
         ).execute()
         values = result.get('values', [])
         if not values:
