@@ -189,6 +189,7 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, mimet
 def read_sheet_data(sheet_id, sheets_service):
     """
     Read data from a Google Sheets file and ensure rows have the same number of columns as the header.
+    If missing columns are added, update the Google Sheet to reflect these changes.
     Caches the data to minimize API calls.
 
     :param sheet_id: ID of the Google Sheet.
@@ -237,10 +238,17 @@ def read_sheet_data(sheet_id, sheets_service):
 
         # Ensure the required columns are present
         required_columns = ['FOLIO DE REGISTRO', 'OFICINA DE CORRESPONDENCIA']
+        new_columns_added = False
         for col in required_columns:
             if col not in df.columns:
                 df[col] = ''
+                new_columns_added = True
                 logger.info(f"Added missing column: {col}")
+
+        if new_columns_added:
+            # Update the sheet with new columns
+            update_sheet_with_new_columns(sheet_id, sheet_name, df.columns.tolist(), sheets_service)
+            logger.info(f"Google Sheet '{sheet_id}' updated with new columns.")
 
         with sheet_cache_lock:
             sheet_cache[sheet_id] = df  # Cache the DataFrame
@@ -253,6 +261,31 @@ def read_sheet_data(sheet_id, sheets_service):
         raise
     except Exception as e:
         logger.error(f"Error in read_sheet_data for sheet '{sheet_id}': {e}")
+        raise
+
+def update_sheet_with_new_columns(sheet_id, sheet_name, columns, sheets_service):
+    """
+    Update the Google Sheet with new columns added to the DataFrame.
+
+    :param sheet_id: ID of the Google Sheet.
+    :param sheet_name: Name of the sheet to update.
+    :param columns: List of column names.
+    :param sheets_service: Authorized Google Sheets service instance.
+    """
+    try:
+        # Prepare the header row with the updated columns
+        body = {
+            'values': [columns]
+        }
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"'{sheet_name}'!A1",
+            valueInputOption='RAW',
+            body=body
+        ).execute()
+        logger.info(f"Sheet '{sheet_name}' header updated with new columns.")
+    except Exception as e:
+        logger.error(f"Error updating sheet '{sheet_name}' with new columns: {e}")
         raise
 
 def col_idx_to_letter(idx):
@@ -300,18 +333,6 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
 
         # Find the index of the 'CLIENTE_UNICO' column (if present)
         client_unique_col_idx = column_indices.get('CLIENTE_UNICO')
-
-        # If 'Folio' column is not found, add it
-        if folio_col_idx is None:
-            df['FOLIO DE REGISTRO'] = ''  # Add the new column
-            folio_col_idx = len(df.columns) - 1  # Get the new index
-            logger.info("Column 'FOLIO DE REGISTRO' was missing and has been added.")
-
-        # If 'Oficina' column is not found, add it
-        if office_col_idx is None:
-            df['OFICINA DE CORRESPONDENCIA'] = ''  # Add the new column
-            office_col_idx = len(df.columns) - 1  # Get the new index
-            logger.info("Column 'OFICINA DE CORRESPONDENCIA' was missing and has been added.")
 
         # Add normalized name column for comparison
         df['Normalized_Name'] = df['NOMBRE_CTE'].apply(normalize_text)
@@ -372,8 +393,6 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
     except Exception as e:
         logger.error(f"Error in update_google_sheet for client '{client_name}': {e}")
         raise
-
-
 
 @retry_decorator
 def batch_update_google_sheet(spreadsheet_id, data, sheets_service):
