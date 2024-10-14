@@ -939,7 +939,7 @@ def extract_demanda_information(pdf_stream):
         text = remove_acuse_content(text)
 
         # Log the cleaned text for debugging
-        logger.info(f"Cleaned DEMANDA Text:\n{text}")
+        logger.info(f"Cleaned DEMANDA Text:\n{text[:200]}")
 
         # Adjusted regex pattern to match the text structure (with dot handling for names like MA. DEL REFUGIO)
         nombre_match = re.search(
