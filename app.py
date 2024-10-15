@@ -2,12 +2,14 @@ from flask import Flask, send_from_directory, redirect, request, session, url_fo
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
+import logging
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import warnings
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
+from backend.pdf_handler import file_storage
 
 # Load environment variables
 load_dotenv()
@@ -16,6 +18,10 @@ load_dotenv()
 app = Flask(__name__, static_folder='frontend', static_url_path='')
 CORS(app)
 app.secret_key = os.getenv('FLASK_SECRET_KEY')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configure server-side session storage
 # Use a writable directory in the deployment environment (such as Google App Engine)
@@ -31,6 +37,11 @@ Session(app)
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 client_secrets_file = os.path.join(os.path.dirname(__file__), 'client_secret.json')
+
+logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f"File storage base path: {file_storage.base_path}")
+logger.info(f"File storage base path exists: {os.path.exists(file_storage.base_path)}")
+logger.info(f"File storage base path is writable: {os.access(file_storage.base_path, os.W_OK)}")
 
 # Index route that ensures the user is authenticated
 @app.route('/')

@@ -1,5 +1,6 @@
 # backend/api_routes.py
 
+import logging
 import multiprocessing
 import uuid
 import time
@@ -16,6 +17,10 @@ from backend.pdf_handler import FileBasedStorage  # Import FileBasedStorage
 
 api_bp = Blueprint('api_bp', __name__)
 file_storage = FileBasedStorage()  # Initialize FileBasedStorage
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @api_bp.route('/process-pdfs', methods=['POST'])
 def process_pdfs():
@@ -102,15 +107,11 @@ def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
 
 @api_bp.route('/progress/<task_id>', methods=['GET'])
 def get_progress(task_id):
-    """
-    Endpoint to retrieve the progress of a PDF processing task.
-    Expects:
-        - task_id: Unique identifier for the processing task.
-    Returns:
-        - JSON response with progress percentage and status.
-    """
     progress = file_storage.get(f"progress:{task_id}")
+    logger.info(f"Retrieved progress for task {task_id}: {progress}")
+    
     if progress is None:
+        logger.warning(f"No progress found for task {task_id}")
         return jsonify({'status': 'unknown task'}), 404
 
     progress = float(progress)
@@ -118,13 +119,17 @@ def get_progress(task_id):
 
     if progress >= 100:
         result = file_storage.get(f"result:{task_id}")
+        logger.info(f"Retrieved result for completed task {task_id}: {result}")
+        
         if result:
             response['status'] = 'completed'
-            response['result'] = json.loads(result)
+            response['result'] = result
         else:
+            logger.warning(f"No result found for completed task {task_id}")
             response['status'] = 'completed'
             response['result'] = {'status': 'error', 'message': 'No result available.'}
     else:
         response['status'] = 'in_progress'
 
+    logger.info(f"Returning response for task {task_id}: {response}")
     return jsonify(response)
