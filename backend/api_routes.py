@@ -12,9 +12,10 @@ from backend.drive_sheets import (
     get_folder_ids
 )
 from backend.auth import get_credentials
-from backend.redis_client import redis_client  # Import Redis client
+from backend.pdf_handler import FileBasedStorage  # Import FileBasedStorage
 
 api_bp = Blueprint('api_bp', __name__)
+file_storage = FileBasedStorage()  # Initialize FileBasedStorage
 
 @api_bp.route('/process-pdfs', methods=['POST'])
 def process_pdfs():
@@ -57,10 +58,10 @@ def process_pdfs():
     # Generate a unique task ID
     task_id = f"task_{uuid.uuid4().hex}"
 
-    # Initialize progress in Redis
-    redis_client.set(f"progress:{task_id}:total", 0)  # Total PDFs unknown at this point
-    redis_client.set(f"progress:{task_id}:completed", 0)
-    redis_client.set(f"progress:{task_id}", 0)  # Overall progress
+    # Initialize progress in FileBasedStorage
+    file_storage.set(f"progress:{task_id}:total", 0)  # Total PDFs unknown at this point
+    file_storage.set(f"progress:{task_id}:completed", 0)
+    file_storage.set(f"progress:{task_id}", 0)  # Overall progress
 
     # Start a multiprocessing.Process to handle the task
     process = multiprocessing.Process(target=process_task, args=(
@@ -74,7 +75,7 @@ def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
                  credentials_json, folder_ids, main_folder_id, task_id):
     """
     Target function for multiprocessing.Process.
-    Processes PDFs and updates Redis with progress and results.
+    Processes PDFs and updates FileBasedStorage with progress and results.
     """
     # Recreate the Drive and Sheets services in the child process
     from google.oauth2.credentials import Credentials
@@ -92,12 +93,12 @@ def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
             folder_id, excel_file_content, excel_filename, sheets_file_id,
             drive_service, sheets_service, folder_ids, main_folder_id, task_id)
         # Mark overall progress as complete
-        redis_client.set(f"progress:{task_id}", 100)
+        file_storage.set(f"progress:{task_id}", 100)
     except Exception as e:
         # Handle exceptions and store error result
-        redis_client.set(f"result:{task_id}", json.dumps({'status': 'error', 'message': f'Ocurrió un error: {str(e)}'}))
+        file_storage.set(f"result:{task_id}", json.dumps({'status': 'error', 'message': f'Ocurrió un error: {str(e)}'}))
         # Ensure progress is marked as complete
-        redis_client.set(f"progress:{task_id}", 100)
+        file_storage.set(f"progress:{task_id}", 100)
 
 @api_bp.route('/progress/<task_id>', methods=['GET'])
 def get_progress(task_id):
@@ -108,7 +109,7 @@ def get_progress(task_id):
     Returns:
         - JSON response with progress percentage and status.
     """
-    progress = redis_client.get(f"progress:{task_id}")
+    progress = file_storage.get(f"progress:{task_id}")
     if progress is None:
         return jsonify({'status': 'unknown task'}), 404
 
@@ -116,7 +117,7 @@ def get_progress(task_id):
     response = {'progress': progress}
 
     if progress >= 100:
-        result = redis_client.get(f"result:{task_id}")
+        result = file_storage.get(f"result:{task_id}")
         if result:
             response['status'] = 'completed'
             response['result'] = json.loads(result)

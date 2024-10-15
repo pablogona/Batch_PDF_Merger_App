@@ -191,3 +191,12 @@ gcloud run deploy pdf-merger-app `
 
 
 flask run --host=0.0.0.0 --port=8080
+
+
+# Run Locally with Docker
+
+## Create Docker image
+docker build -t pdf-merger-app .
+
+##
+docker run -p 8080:8080 --env-file .env pdf-merger-app

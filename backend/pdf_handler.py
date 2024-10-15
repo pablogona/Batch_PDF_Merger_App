@@ -6,6 +6,11 @@ import logging
 import multiprocessing
 from functools import partial
 import json
+import os
+from collections import defaultdict
+import concurrent.futures
+import pandas as pd  # Ensure pandas is imported
+import unicodedata  # For text normalization
 from pypdf import PdfReader, PdfWriter
 from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.errors import HttpError
@@ -19,16 +24,66 @@ from backend.drive_sheets import (
     batch_update_google_sheet
 )
 from backend.utils import normalize_text
-from backend.redis_client import redis_client  # Use Redis for progress tracking
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-from collections import defaultdict
-import concurrent.futures
-import pandas as pd  # Ensure pandas is imported
-import unicodedata  # For text normalization
+from threading import Lock
+from filelock import FileLock  # Ensure filelock is installed: pip install filelock
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# File-based storage for progress tracking
+class FileBasedStorage:
+    def __init__(self, base_path='/tmp'):
+        self.base_path = base_path
+        self.lock = Lock()
+
+    def _get_file_path(self, key):
+        return os.path.join(self.base_path, f"{key}.json")
+
+    def set(self, key, value):
+        file_path = self._get_file_path(key)
+        with self.lock:
+            try:
+                with FileLock(f"{file_path}.lock"):
+                    with open(file_path, 'w') as f:
+                        json.dump(value, f)
+            except IOError as e:
+                logger.error(f"Error writing to file {file_path}: {e}")
+
+    def get(self, key):
+        file_path = self._get_file_path(key)
+        try:
+            with self.lock:
+                with FileLock(f"{file_path}.lock"):
+                    with open(file_path, 'r') as f:
+                        return json.load(f)
+        except FileNotFoundError:
+            return None
+        except IOError as e:
+            logger.error(f"Error reading file {file_path}: {e}")
+            return None
+
+    def incr(self, key):
+        file_path = self._get_file_path(key)
+        with self.lock:
+            try:
+                with FileLock(f"{file_path}.lock"):
+                    try:
+                        with open(file_path, 'r') as f:
+                            value = json.load(f)
+                    except FileNotFoundError:
+                        value = 0
+                    value += 1
+                    with open(file_path, 'w') as f:
+                        json.dump(value, f)
+                    return value
+            except IOError as e:
+                logger.error(f"Error incrementing file {file_path}: {e}")
+                return None
+
+# Initialize file-based storage
+file_storage = FileBasedStorage()
 
 # Retry decorator for Google API calls to handle transient errors
 @retry(
@@ -89,7 +144,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id):
             raise e  # Let the retry mechanism handle it
 
     total_pdfs = len(files)
-    redis_client.set(f"progress:{task_id}:total", total_pdfs)
+    file_storage.set(f"progress:{task_id}:total", total_pdfs)
 
     if total_pdfs == 0:
         logger.warning(f"No PDFs found in folder {folder_id}.")
@@ -110,7 +165,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id):
             # Update progress (10% to 30%)
             processed_pdfs += 1
             progress_value = 10 + ((processed_pdfs / total_pdfs) * 20)  # Allocating 20% for fetching
-            redis_client.set(f"progress:{task_id}", progress_value)
+            file_storage.set(f"progress:{task_id}", progress_value)
             logger.info(f"Fetched {processed_pdfs}/{total_pdfs} PDFs. Progress: {progress_value:.1f}%")
         except HttpError as e:
             logger.error(f"Failed to fetch PDF {file['name']}: {e}")
@@ -161,13 +216,14 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             raise ValueError("No Excel file content or Sheets file ID provided.")
 
         # Initialize progress to 10% after uploading Excel
-        redis_client.set(f"progress:{task_id}", 10)
+        file_storage.set(f"progress:{task_id}", 10)
+        logger.info("Progress set to 10% after uploading Excel file.")
 
         # Fetch PDFs
         pdf_files_data = fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id)
         logger.info(f"Total PDFs fetched for processing: {len(pdf_files_data)}")
         total_pdfs = len(pdf_files_data)
-        redis_client.set(f"progress:{task_id}:total", total_pdfs)
+        file_storage.set(f"progress:{task_id}:total", total_pdfs)
 
         if total_pdfs == 0:
             logger.warning(f"No PDFs found in folder {folder_id}.")
@@ -176,8 +232,9 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 'message': 'No PDFs found to process.',
                 'errors': []
             }
-            redis_client.set(f"result:{task_id}", json.dumps(result))
-            redis_client.set(f"progress:{task_id}", 100)
+            file_storage.set(f"result:{task_id}", result)
+            file_storage.set(f"progress:{task_id}", 100)
+            logger.info("Progress set to 100% as no PDFs were found.")
             return
 
         # Prepare for multiprocessing
@@ -187,8 +244,9 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         error_data = manager.list()  # Initialize error data collection
         error_files_set = manager.dict()  # To keep track of files added to error_data
 
-        # Initialize extraction progress
-        redis_client.set(f"progress:{task_id}:completed_extraction", 0)
+        # Initialize progress tracking
+        file_storage.set(f"progress:{task_id}:completed_extraction", 0)
+        logger.info("Initialized multiprocessing manager and progress tracking for PDF extraction.")
 
         # Create a partial function with fixed arguments
         extract_pdf_info_partial = partial(
@@ -199,17 +257,20 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             error_files_set=error_files_set,  # Pass error_files_set
             drive_service=drive_service,
             folder_ids=folder_ids,
-            task_id=task_id
+            task_id=task_id,
+            total_pdfs=total_pdfs
         )
 
-        # Process PDFs in parallel to extract info
-        pool = multiprocessing.Pool(processes=multiprocessing.cpu_count())
-        pool.map(extract_pdf_info_partial, pdf_files_data)
-        pool.close()
-        pool.join()
+        # Use a Pool for multiprocessing
+        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+            for result in pool.imap_unordered(extract_pdf_info_partial, pdf_files_data):
+                if result:
+                    logger.info(f"Processed PDF: {result}")
+                # Progress is updated within extract_pdf_info
 
-        # Update progress to 60% after extraction
-        redis_client.set(f"progress:{task_id}", 60)
+        # Ensure final progress is set to 60% after extraction
+        file_storage.set(f"progress:{task_id}", 60)
+        logger.info("Extraction completed. Progress set to 60%.")
 
         # Convert manager lists to regular lists
         pdf_info_list = list(pdf_info_list)
@@ -217,131 +278,163 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         error_data = list(error_data)
         error_files_set = dict(error_files_set)
 
-        # Pair PDFs based on names and types
-        pairs, pairing_errors = pair_pdfs(pdf_info_list, folder_ids['PDFs con Error'], drive_service, error_data, error_files_set)
-        errors.extend(pairing_errors)
+        # Start of Added Changes
+        try:
+            # Add logging before pairing
+            logger.info("Starting PDF pairing process")
 
-        # Update progress after pairing
-        redis_client.set(f"progress:{task_id}", 70)
+            pairs, pairing_errors = pair_pdfs(pdf_info_list, folder_ids['PDFs con Error'], drive_service, error_data, error_files_set)
+            logger.info(f"PDF pairing completed. {len(pairs)} pairs created.")
 
-        # Process pairs
-        total_pairs = len(pairs)
-        if total_pairs == 0:
-            total_pairs = 1  # Prevent division by zero
-        processed_pairs = 0
-        pairs_attempted = 0
+            # Add pairing errors to the main errors list
+            errors.extend(pairing_errors)
 
-        # Initialize list to collect batch updates for Google Sheets
-        batch_updates = []
+            # Add logging before processing pairs
+            logger.info("Starting to process PDF pairs")
 
-        for pair in pairs:
-            pairs_attempted += 1  # Increment pairs_attempted for each pair processed
-            merged_pdf = merge_pdfs([pair['pdfs'][0], pair['pdfs'][1]])
-
-            if merged_pdf:
-                client_unique = update_google_sheet(
-                    excel_file_id,
-                    pair['info']['name'],
-                    pair['info'].get('folio_number'),
-                    pair['info'].get('oficina'),
-                    sheets_service,
-                    batch_updates=batch_updates
-                )
-
-                if client_unique:
-                    # Use original name for the final file name
-                    file_name = f"{client_unique} {pair['info']['name']}.pdf"
-                    upload_file_to_drive(merged_pdf, folder_ids['PDFs Unificados'], drive_service, file_name)
-                    logger.info(f"Merged PDF for {pair['info']['name']} uploaded to 'PDFs Unificados'")
-
-                    # Only increment processed_pairs if the pair was successfully processed
-                    processed_pairs += 1
-                else:
-                    # Client not found in sheet
-                    for pdf_content, pdf_filename in zip(pair['pdfs'], pair['pdf_filenames']):
-                        errors.append({
-                            'file_name': pdf_filename,
-                            'message': f"Client '{pair['info']['name']}' no encontrado en excel."
-                        })
-                        logger.warning(f"Client '{pair['info']['name']}' no encontrado en excel.")
-
-                        # Collect error data
-                        error_entry = {
-                            'DOCUMENTO': pdf_filename,
-                            'NOMBRE_CTE': pair['info']['name'],
-                            'FOLIO DE REGISTRO': pair['info'].get('folio_number', ''),
-                            'OFICINA DE CORRESPONDENCIA': pair['info'].get('oficina', ''),
-                            'ERROR': f"Client '{pair['info']['name']}' no encontrado en excel."
-                        }
-                        error_data.append(error_entry)
-                        error_files_set[pdf_filename] = True
-
-                        # Upload to 'PDFs con Error' folder
-                        try:
-                            upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
-                            logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
-                        except Exception as e:
-                            logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+            total_pairs = len(pairs)
+            if total_pairs == 0:
+                logger.warning("No PDF pairs to process.")
+                # Proceed to uploading error Excel if needed
             else:
-                # Failed to merge PDFs
-                for pdf_content, pdf_filename in zip(pair['pdfs'], pair['pdf_filenames']):
-                    errors.append({
-                        'file_name': pdf_filename,
-                        'message': f"Failed to merge PDFs for {pair['info']['name']}"
-                    })
-                    logger.warning(f"Failed to merge PDFs for {pair['info']['name']}")
+                processed_pairs = 0
+                pairs_attempted = 0
 
-                    # Collect error data
-                    error_entry = {
-                        'DOCUMENTO': pdf_filename,
-                        'NOMBRE_CTE': pair['info']['name'],
-                        'FOLIO DE REGISTRO': pair['info'].get('folio_number', ''),
-                        'OFICINA DE CORRESPONDENCIA': pair['info'].get('oficina', ''),
-                        'ERROR': f"Failed to merge PDFs for {pair['info']['name']}"
-                    }
-                    error_data.append(error_entry)
-                    error_files_set[pdf_filename] = True
+                # Initialize list to collect batch updates for Google Sheets
+                batch_updates = []
 
-                    # Upload to 'PDFs con Error' folder
+                for index, pair in enumerate(pairs):
                     try:
-                        upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
-                        logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
+                        # Existing code for processing each pair
+                        merged_pdf = merge_pdfs([pair['pdfs'][0], pair['pdfs'][1]])
+
+                        if merged_pdf:
+                            client_unique = update_google_sheet(
+                                excel_file_id,
+                                pair['info']['name'],
+                                pair['info'].get('folio_number'),
+                                pair['info'].get('oficina'),
+                                sheets_service,
+                                batch_updates=batch_updates
+                            )
+
+                            if client_unique:
+                                # Use original name for the final file name
+                                file_name = f"{client_unique} {pair['info']['name']}.pdf"
+                                upload_file_to_drive(merged_pdf, folder_ids['PDFs Unificados'], drive_service, file_name)
+                                logger.info(f"Merged PDF for {pair['info']['name']} uploaded to 'PDFs Unificados'")
+
+                                # Only increment processed_pairs if the pair was successfully processed
+                                processed_pairs += 1
+                            else:
+                                # Client not found in sheet
+                                for pdf_content, pdf_filename in zip(pair['pdfs'], pair['pdf_filenames']):
+                                    errors.append({
+                                        'file_name': pdf_filename,
+                                        'message': f"Client '{pair['info']['name']}' no encontrado en excel."
+                                    })
+                                    logger.warning(f"Client '{pair['info']['name']}' no encontrado en excel.")
+
+                                    # Collect error data
+                                    error_entry = {
+                                        'DOCUMENTO': pdf_filename,
+                                        'NOMBRE_CTE': pair['info']['name'],
+                                        'FOLIO DE REGISTRO': pair['info'].get('folio_number', ''),
+                                        'OFICINA DE CORRESPONDENCIA': pair['info'].get('oficina', ''),
+                                        'ERROR': f"Client '{pair['info']['name']}' no encontrado en excel."
+                                    }
+                                    error_data.append(error_entry)
+                                    error_files_set[pdf_filename] = True
+
+                                    # Upload to 'PDFs con Error' folder
+                                    try:
+                                        upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
+                                        logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
+                                    except Exception as e:
+                                        logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+
+                        else:
+                            # Failed to merge PDFs
+                            for pdf_content, pdf_filename in zip(pair['pdfs'], pair['pdf_filenames']):
+                                errors.append({
+                                    'file_name': pdf_filename,
+                                    'message': f"Failed to merge PDFs for {pair['info']['name']}"
+                                })
+                                logger.warning(f"Failed to merge PDFs for {pair['info']['name']}")
+
+                                # Collect error data
+                                error_entry = {
+                                    'DOCUMENTO': pdf_filename,
+                                    'NOMBRE_CTE': pair['info']['name'],
+                                    'FOLIO DE REGISTRO': pair['info'].get('folio_number', ''),
+                                    'OFICINA DE CORRESPONDENCIA': pair['info'].get('oficina', ''),
+                                    'ERROR': f"Failed to merge PDFs for {pair['info']['name']}"
+                                }
+                                error_data.append(error_entry)
+                                error_files_set[pdf_filename] = True
+
+                                # Upload to 'PDFs con Error' folder
+                                try:
+                                    upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
+                                    logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
+                                except Exception as e:
+                                    logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+
+                        # Add more granular progress updates
+                        progress_value = 70 + ((index + 1) / total_pairs * 30)  # Scale to 70-100%
+                        file_storage.set(f"progress:{task_id}", progress_value)
+                        logger.info(f"Processed pair {index + 1}/{total_pairs}. Progress: {progress_value:.1f}%")
+
+                    except Exception as pair_error:
+                        logger.error(f"Error processing pair {index + 1}: {str(pair_error)}")
+                        errors.append({
+                            'pair_index': index + 1,
+                            'message': f"Error processing pair: {str(pair_error)}"
+                        })
+                        # Continue processing other pairs
+
+                # Add logging after processing all pairs
+                logger.info("Completed processing all PDF pairs")
+
+                # After processing all pairs, perform batch update to Google Sheets
+                if batch_updates:
+                    try:
+                        batch_update_google_sheet(excel_file_id, batch_updates, sheets_service)
+                        logger.info(f"Batch update to Google Sheets completed with {len(batch_updates)} updates.")
                     except Exception as e:
-                        logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+                        logger.error(f"Error during batch update to Google Sheets: {e}")
+                else:
+                    logger.info("No updates to perform on Google Sheets.")
 
-            # Update progress after each pair attempted
-            progress_value = 70 + ((pairs_attempted / total_pairs) * 29)  # Scale to 70-99%
-            redis_client.set(f"progress:{task_id}", progress_value)
-            logger.info(f"Attempted pair {pairs_attempted}/{total_pairs}. Progress: {progress_value:.1f}%")
-
-        # After processing all pairs, perform batch update to Google Sheets
-        if batch_updates:
-            batch_update_google_sheet(excel_file_id, batch_updates, sheets_service)
-            logger.info(f"Batch update to Google Sheets completed with {len(batch_updates)} updates.")
-        else:
-            logger.info("No updates to perform on Google Sheets.")
+        except Exception as e:
+            logger.error(f"Unexpected error during PDF pairing and processing: {str(e)}")
+            # Handle the error, update progress to 100%, and set an error result
+            error_result = {'status': 'error', 'message': str(e)}
+            file_storage.set(f"result:{task_id}", error_result)
+            file_storage.set(f"progress:{task_id}", 100)
+            return  # Exit the function as a critical error occurred
 
         # Create Excel file for PDFs with errors
         if error_data:
-            df_errors = pd.DataFrame(error_data, columns=[
-                'DOCUMENTO',
-                'NOMBRE_CTE',
-                'FOLIO DE REGISTRO',
-                'OFICINA DE CORRESPONDENCIA',
-                'ERROR'
-            ])
-
-            # Remove duplicate entries based on 'DOCUMENTO' and 'ERROR' to avoid duplicates
-            df_errors.drop_duplicates(subset=['DOCUMENTO', 'ERROR'], inplace=True)
-
-            # Save DataFrame to Excel file in memory
-            excel_buffer = io.BytesIO()
-            df_errors.to_excel(excel_buffer, index=False)
-            excel_buffer.seek(0)
-
-            # Upload the Excel file to the process folder
-            excel_file_name = 'PDFs con Error.xlsx'
             try:
+                df_errors = pd.DataFrame(error_data, columns=[
+                    'DOCUMENTO',
+                    'NOMBRE_CTE',
+                    'FOLIO DE REGISTRO',
+                    'OFICINA DE CORRESPONDENCIA',
+                    'ERROR'
+                ])
+
+                # Remove duplicate entries based on 'DOCUMENTO' and 'ERROR' to avoid duplicates
+                df_errors.drop_duplicates(subset=['DOCUMENTO', 'ERROR'], inplace=True)
+
+                # Save DataFrame to Excel file in memory
+                excel_buffer = io.BytesIO()
+                df_errors.to_excel(excel_buffer, index=False)
+                excel_buffer.seek(0)
+
+                # Upload the Excel file to the process folder
+                excel_file_name = 'PDFs con Error.xlsx'
                 upload_file_to_drive(
                     excel_buffer,
                     main_folder_id,  # Upload to the process-specific folder
@@ -351,7 +444,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 )
                 logger.info(f"Excel file '{excel_file_name}' uploaded to process folder with ID: {main_folder_id}")
             except Exception as e:
-                logger.error(f"Error uploading Excel file '{excel_file_name}': {e}")
+                logger.error(f"Error creating or uploading Excel file for errors: {e}")
         else:
             logger.info("No error data to write to Excel.")
 
@@ -362,21 +455,33 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             'errors': errors
         }
 
-        # Store the result in Redis before setting progress to 100%
-        redis_client.set(f"result:{task_id}", json.dumps(result))
+        # Store the result in file-based storage before setting progress to 100%
+        file_storage.set(f"result:{task_id}", result)
 
         # Update overall progress to 100%
-        redis_client.set(f"progress:{task_id}", 100)
+        file_storage.set(f"progress:{task_id}", 100)
+        logger.info("Processing completed successfully. Progress set to 100%.")
 
     except Exception as e:
-        # Handle exceptions and update Redis
-        error_result = {'status': 'error', 'message': str(e)}
-        redis_client.set(f"result:{task_id}", json.dumps(error_result))
-        # Ensure overall progress is marked as complete
-        redis_client.set(f"progress:{task_id}", 100)
+        # Handle exceptions and update file-based storage
         logger.error(f"Error processing PDFs: {str(e)}")
+        error_result = {'status': 'error', 'message': str(e)}
+        file_storage.set(f"result:{task_id}", error_result)
+        # Ensure overall progress is marked as complete
+        file_storage.set(f"progress:{task_id}", 100)
+        logger.info("Progress set to 100% due to an error.")
 
-def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_set, drive_service, folder_ids, task_id):
+    finally:
+        # Ensure progress is set to 100% even if an error occurred
+        file_storage.set(f"progress:{task_id}", 100)
+        logger.info("PDF processing completed (success or failure). Progress ensured at 100%.")
+
+def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_set, 
+                     drive_service, folder_ids, task_id, total_pdfs):
+    """
+    Extract information from a single PDF and update progress.
+    Returns the filename if processed successfully, otherwise None.
+    """
     pdf_filename = pdf_data['filename']
     pdf_content = pdf_data['content']
     pdf_stream = io.BytesIO(pdf_content)
@@ -424,7 +529,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
             except Exception as e:
                 logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
-            return
+            return None
 
         if info is None:
             # Extraction failed
@@ -450,7 +555,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
             except Exception as e:
                 logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
-            return
+            return None
 
         # Log the info extracted before normalization
         logger.debug(f"Extracted info before normalization: {info}")
@@ -492,6 +597,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 logger.info(f"Uploaded PDF with incomplete info '{pdf_filename}' to 'PDFs con Error'")
             except Exception as e:
                 logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+            return None
         else:
             # All critical fields are present
             pdf_info_list.append({
@@ -500,12 +606,16 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
                 'info': info
             })
 
-        # Update progress after processing each PDF
-        completed = redis_client.incr(f"progress:{task_id}:completed_extraction")
-        total_pdfs = int(redis_client.get(f"progress:{task_id}:total") or 1)
+        # Log successful processing
+        logger.info(f"Successfully extracted information from PDF: {pdf_filename}")
+
+        # Update progress
+        completed = file_storage.incr(f"progress:{task_id}:completed_extraction")
         progress_value = 30 + ((completed / total_pdfs) * 30)  # Scale to 30-60%
-        redis_client.set(f"progress:{task_id}", progress_value)
+        file_storage.set(f"progress:{task_id}", progress_value)
         logger.info(f"Extracted info from {completed}/{total_pdfs} PDFs. Progress: {progress_value:.1f}%")
+
+        return pdf_filename  # Return the filename to indicate successful processing
 
     except Exception as e:
         logger.error(f"Error processing PDF {pdf_filename}: {e}")
@@ -529,6 +639,16 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             logger.info(f"Uploaded error PDF '{pdf_filename}' to 'PDFs con Error'")
         except Exception as e:
             logger.error(f"Error uploading PDF '{pdf_filename}' to 'PDFs con Error': {e}")
+        return None
+    finally:
+        # Ensure progress is updated even if an error occurs
+        try:
+            completed = file_storage.get(f"progress:{task_id}:completed_extraction") or 0
+            progress_value = 30 + ((completed / total_pdfs) * 30)
+            file_storage.set(f"progress:{task_id}", progress_value)
+            logger.info(f"Progress updated to {progress_value:.1f}% after processing '{pdf_filename}'.")
+        except Exception as e:
+            logger.error(f"Error updating progress for task {task_id}: {e}")
 
 def classify_pdf(pdf_content, filename):
     """
@@ -903,7 +1023,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                         logger.error(f"Error uploading ACUSE '{pdf_filename}' to 'PDFs con Error': {e}")
 
     return pairs, errors
-
 
 def merge_pdfs(pdfs):
     """
