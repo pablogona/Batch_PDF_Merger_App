@@ -7,16 +7,21 @@ import time
 import json
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from backend.pdf_handler import process_pdfs_in_folder
+from backend.pdf_handler import process_pdfs_in_folder, FileBasedStorage
 from backend.drive_sheets import (
-    get_drive_service, get_sheets_service,
-    get_folder_ids
+    upload_file_to_drive,
+    update_google_sheet,
+    get_or_create_folder,
+    read_sheet_data,
+    get_folder_ids,
+    upload_excel_to_drive,
+    batch_update_google_sheet,
+    get_drive_service,
+    get_sheets_service
 )
 from backend.auth import get_credentials
-from backend.pdf_handler import FileBasedStorage  # Import FileBasedStorage
 
 api_bp = Blueprint('api_bp', __name__)
-file_storage = FileBasedStorage()  # Initialize FileBasedStorage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +68,9 @@ def process_pdfs():
     # Generate a unique task ID
     task_id = f"task_{uuid.uuid4().hex}"
 
+    # Initialize FileBasedStorage within the endpoint
+    file_storage = FileBasedStorage()
+
     # Initialize progress in FileBasedStorage
     file_storage.set(f"progress:{task_id}:total", 0)  # Total PDFs unknown at this point
     file_storage.set(f"progress:{task_id}:completed", 0)
@@ -90,31 +98,49 @@ def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
     drive_service = get_drive_service(credentials)
     sheets_service = get_sheets_service(credentials)
 
-    from backend.pdf_handler import process_pdfs_in_folder
-
     try:
+        # Initialize FileBasedStorage within the child process
+        file_storage = FileBasedStorage()
+        logger.info(f"File storage initialized in child process. Base path: {file_storage.base_path}")
+
         # Start processing PDFs
         process_pdfs_in_folder(
             folder_id, excel_file_content, excel_filename, sheets_file_id,
             drive_service, sheets_service, folder_ids, main_folder_id, task_id)
+        
         # Mark overall progress as complete
         file_storage.set(f"progress:{task_id}", 100)
+        logger.info(f"Task {task_id} completed. Progress set to 100%.")
     except Exception as e:
+        logger.error(f"Error in processing task {task_id}: {e}", exc_info=True)
         # Handle exceptions and store error result
-        file_storage.set(f"result:{task_id}", json.dumps({'status': 'error', 'message': f'Ocurrió un error: {str(e)}'}))
+        file_storage.set(f"result:{task_id}", {'status': 'error', 'message': f'Ocurrió un error: {str(e)}'})
         # Ensure progress is marked as complete
         file_storage.set(f"progress:{task_id}", 100)
 
 @api_bp.route('/progress/<task_id>', methods=['GET'])
 def get_progress(task_id):
+    """
+    Endpoint to retrieve the progress of a specific task.
+    Returns:
+        - JSON response with progress percentage and status.
+    """
+    # Initialize FileBasedStorage within the endpoint
+    file_storage = FileBasedStorage()
+
     progress = file_storage.get(f"progress:{task_id}")
     logger.info(f"Retrieved progress for task {task_id}: {progress}")
-    
+
     if progress is None:
         logger.warning(f"No progress found for task {task_id}")
         return jsonify({'status': 'unknown task'}), 404
 
-    progress = float(progress)
+    try:
+        progress = float(progress)
+    except ValueError:
+        logger.error(f"Invalid progress value for task {task_id}: {progress}")
+        return jsonify({'status': 'error', 'message': 'Invalid progress value.'}), 500
+
     response = {'progress': progress}
 
     if progress >= 100:
@@ -122,6 +148,7 @@ def get_progress(task_id):
         logger.info(f"Retrieved result for completed task {task_id}: {result}")
         
         if result:
+            # Since result is already a dictionary, no need to call json.loads
             response['status'] = 'completed'
             response['result'] = result
         else:
@@ -132,4 +159,4 @@ def get_progress(task_id):
         response['status'] = 'in_progress'
 
     logger.info(f"Returning response for task {task_id}: {response}")
-    return jsonify(response)
+    return jsonify(response), 200

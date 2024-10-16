@@ -1,6 +1,9 @@
+# app.py
+
 from flask import Flask, send_from_directory, redirect, request, session, url_for, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+import json
 import os
 import logging
 from google_auth_oauthlib.flow import Flow
@@ -9,7 +12,6 @@ from google.auth.transport.requests import Request
 import warnings
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
-from backend.pdf_handler import file_storage
 
 # Load environment variables
 load_dotenv()
@@ -38,10 +40,45 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 client_secrets_file = os.path.join(os.path.dirname(__file__), 'client_secret.json')
 
-logger.info(f"Current working directory: {os.getcwd()}")
-logger.info(f"File storage base path: {file_storage.base_path}")
-logger.info(f"File storage base path exists: {os.path.exists(file_storage.base_path)}")
-logger.info(f"File storage base path is writable: {os.access(file_storage.base_path, os.W_OK)}")
+# Removed global file_storage initialization
+# Any required FileBasedStorage instances should be initialized within specific functions or blueprints
+
+# Function to get credentials from session or refresh them if expired
+def get_credentials():
+    if 'credentials' not in session:
+        return None
+
+    credentials_info = session['credentials']
+    credentials = Credentials(
+        token=credentials_info['token'],
+        refresh_token=credentials_info.get('refresh_token'),
+        token_uri=credentials_info['token_uri'],
+        client_id=credentials_info['client_id'],
+        client_secret=credentials_info['client_secret'],
+        scopes=credentials_info['scopes']
+    )
+
+    # If the credentials are expired, refresh them
+    if credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+            session['credentials'] = credentials_to_dict(credentials)
+        except Exception as e:
+            logger.error(f"Error refreshing credentials: {e}")
+            session.clear()
+            return None
+    return credentials
+
+# Helper function to convert credentials to dictionary
+def credentials_to_dict(credentials):
+    return {
+        'token': credentials.token,
+        'refresh_token': credentials.refresh_token,
+        'token_uri': credentials.token_uri,
+        'client_id': credentials.client_id,
+        'client_secret': credentials.client_secret,
+        'scopes': credentials.scopes
+    }
 
 # Index route that ensures the user is authenticated
 @app.route('/')
@@ -98,7 +135,7 @@ def callback():
             warnings.simplefilter("ignore")  # Ignore warnings
             flow.fetch_token(authorization_response=request.url)
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred during OAuth callback: {e}")
         return f"An error occurred: {e}", 500
 
     credentials = flow.credentials
@@ -119,59 +156,33 @@ def check_auth():
         return jsonify({"authenticated": False}), 401
     return jsonify({"authenticated": True})
 
-# Progress endpoint
-@app.route('/api/progress')
-def progress():
-    progress = session.get('progress', 0)
-    return jsonify({'progress': progress})
-
 # Process result endpoint to retrieve final result
 @app.route('/api/process-result')
 def process_result():
-    result = session.get('process_result')
+    task_id = request.args.get('task_id')
+    if not task_id:
+        return jsonify({"status": "error", "message": "Task ID not provided"}), 400
+
+    # Initialize FileBasedStorage within the endpoint
+    from backend.pdf_handler import FileBasedStorage
+    file_storage = FileBasedStorage()
+
+    result = file_storage.get(f"result:{task_id}")
     if result:
-        folder_name = session.get('folder_name', '')
-        session.pop('process_result', None)
-        session.pop('folder_name', None)
-        return jsonify({**result, 'folder_name': folder_name})
-    else:
-        return jsonify({'status': 'processing'}), 202  # Still processing
-
-# Function to get credentials from session or refresh them if expired
-def get_credentials():
-    if 'credentials' not in session:
-        return None
-
-    credentials_info = session['credentials']
-    credentials = Credentials(
-        token=credentials_info['token'],
-        refresh_token=credentials_info.get('refresh_token'),
-        token_uri=credentials_info['token_uri'],
-        client_id=credentials_info['client_id'],
-        client_secret=credentials_info['client_secret'],
-        scopes=credentials_info['scopes']
-    )
-
-    # If the credentials are expired, refresh them
-    if credentials.expired and credentials.refresh_token:
+        # Assuming result is stored as a dictionary
         try:
-            credentials.refresh(Request())
-            session['credentials'] = credentials_to_dict(credentials)
-        except Exception as e:
-            session.clear()
-            return None
-    return credentials
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            result = {"status": "error", "message": "Invalid result format."}
+    else:
+        result = {"status": "processing", "message": "The task is still processing."}
 
-# Helper function to convert credentials to dictionary
-def credentials_to_dict(credentials):
-    return {
-        'token': credentials.token,
-        'refresh_token': credentials.refresh_token,
-        'token_uri': credentials.token_uri,
-        'client_id': credentials.client_id,
-        'client_secret': credentials.client_secret,
-        'scopes': credentials.scopes
-    }
+    folder_name = file_storage.get(f"folder_name:{task_id}")  # If you store folder_name
+    response = {"result": result}
+    if folder_name:
+        response["folder_name"] = folder_name
+
+    return jsonify(response)
 
 # Import and register the API blueprint (assumes you have this in backend/api_routes.py)
 from backend.api_routes import api_bp
@@ -184,4 +195,3 @@ def serve_static(path):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
-
