@@ -120,25 +120,31 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id):
 
 def normalize_name(name):
     """
-    Normalize names by converting to uppercase, removing accents, and stripping whitespace.
+    Normalize names by replacing lowercase 'n' followed by space(s) with 'Ñ',
+    converting to uppercase, removing accents, and stripping whitespace.
     """
     if not name:
         return ''
-
-    # Replace common misread representations of 'Ñ' with 'N'
-    name = name.replace('Ñ', 'N').replace('ñ', 'n').replace('N~', 'N').replace('n~', 'n')
-    # Replace 'Ñ' with 'N'
-    name = name.replace('Ñ', 'N').replace('ñ', 'n')
-    # Remove accents
+    
+    # Step 1: Replace lowercase 'n' followed by space(s) with 'Ñ'
+    # Example: 'MU n OZ' -> 'MU ÑOZ'
+    name = re.sub(r'n\s+', 'Ñ', name)
+    
+    # Step 2: Convert to uppercase to ensure consistency
+    name = name.upper()
+    
+    # Step 3: Remove accents from characters
     name = unicodedata.normalize('NFD', name)
     name = ''.join(char for char in name if unicodedata.category(char) != 'Mn')
-    # Convert to uppercase
-    name = name.upper()
-    # Replace multiple spaces with a single space
+    
+    # Step 4: Replace multiple spaces with a single space
     name = re.sub(r'\s+', ' ', name)
-    # Strip leading and trailing whitespace
+    
+    # Step 5: Strip leading and trailing whitespace
     name = name.strip()
+    
     return name
+
 
 def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets_file_id,
                            drive_service, sheets_service, folder_ids, main_folder_id, task_id):
@@ -1049,6 +1055,13 @@ def post_process_text(text):
     # Replace known concatenated words with proper spacing
     text = text.replace("Oficinade", "Oficina de")
     text = text.replace("Foliode", "Folio de")
+    text = text.replace("Estadode", "Estado de")
+    text = text.replace("elEstado", "el Estado")
+    text = text.replace("Residenciade", "Residencia de")
+    
+    # General correction: Insert space between a lowercase letter followed by an uppercase letter
+    text = re.sub(r'([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])', r'\1 \2', text)
+    
     # Normalize text to remove extra whitespace
     text = normalize_text(text)
     return text
