@@ -230,16 +230,19 @@ document.addEventListener('DOMContentLoaded', () => {
         resultsSection.classList.add('hidden'); // Hide results section at the start
 
         // Prepare data to send to backend
+        console.log("Preparing to send request to /api/process-pdfs");
         const formData = new FormData();
         formData.append('excelFile', selectedExcelFile);
         formData.append('folderId', selectedFolderId);  // Send Google Drive folder ID to backend
 
         // Send data to backend and start polling
         try {
+            console.log("Sending request to /api/process-pdfs");
             const response = await fetch('/api/process-pdfs', {
                 method: 'POST',
                 body: formData,
             });
+            console.log("Response received from /api/process-pdfs:", response);
             const result = await response.json();
 
             if (result.status === 'success') {
@@ -255,6 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (error) {
             console.error('Error processing PDFs:', error);
+            console.error('Error details:', error.message);
             progressSection.classList.add('hidden');
             resultsSection.classList.remove('hidden');
             resultsDiv.innerHTML = `<p>Hubo un error durante el procesamiento de los archivos. Inténtalo de nuevo.</p>`;

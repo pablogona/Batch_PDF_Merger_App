@@ -1,0 +1,7 @@
+# Exclude environment files
+.env
+.env.yaml
+
+# Exclude Python virtual environments
+.venv/
+venv/

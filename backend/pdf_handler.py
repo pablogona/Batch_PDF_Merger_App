@@ -247,7 +247,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id, file_storage
 def normalize_name(name):
     """
     Normalize names by replacing lowercase 'n' followed by space(s) with 'Ñ',
-    converting to uppercase, and stripping whitespace.
+    converting to uppercase, removing accents, and stripping whitespace.
     """
     if not name:
         return ''
@@ -259,10 +259,14 @@ def normalize_name(name):
     # Step 2: Convert to uppercase to ensure consistency
     name = name.upper()
     
-    # Step 3: Replace multiple spaces with a single space
+    # Step 3: Remove accents from characters
+    name = unicodedata.normalize('NFD', name)
+    name = ''.join(char for char in name if unicodedata.category(char) != 'Mn')
+    
+    # Step 4: Replace multiple spaces with a single space
     name = re.sub(r'\s+', ' ', name)
     
-    # Step 4: Strip leading and trailing whitespace
+    # Step 5: Strip leading and trailing whitespace
     name = name.strip()
     
     return name
@@ -314,7 +318,10 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 'message': 'No PDFs found to process.',
                 'errors': []
             }
-            file_storage.set_result_and_progress(task_id, result, 100)
+            file_storage.set(f"progress:{task_id}", 99.9)
+            file_storage.set(f"result:{task_id}", result)
+            time.sleep(0.5)
+            file_storage.set(f"progress:{task_id}", 100)
             logger.info("Progress set to 100% as no PDFs were found.")
             return
 
@@ -426,7 +433,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                                 error_files_set[pdf_filename] = True
                                 upload_file_to_drive(io.BytesIO(pdf_content), folder_ids['PDFs con Error'], drive_service, pdf_filename)
 
-                        progress_value = 70 + ((index + 1) / total_pairs * 30)
+                        progress_value = 70 + ((index + 1) / total_pairs * 29)  # Changed to 29 to leave room for 99.9%
                         file_storage.set(f"progress:{task_id}", round(progress_value, 1))
                         logger.info(f"Processed pair {index + 1}/{total_pairs}. Progress: {progress_value:.1f}%")
 
@@ -451,7 +458,10 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
         except Exception as e:
             logger.error(f"Error during PDF pairing: {str(e)}", exc_info=True)
             error_result = {'status': 'error', 'message': f"PDF pairing failed: {str(e)}"}
-            file_storage.set_result_and_progress(task_id, error_result, 100)
+            file_storage.set(f"progress:{task_id}", 99.9)
+            file_storage.set(f"result:{task_id}", error_result)
+            time.sleep(0.5)
+            file_storage.set(f"progress:{task_id}", 100)
             return
 
         # Create Excel file for PDFs with errors
@@ -485,27 +495,55 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
             'errors': list(errors)  # Convert manager.list() to regular list
         }
 
-        file_storage.set_result_and_progress(task_id, result, 100)
-        time.sleep(0.5)  # Add a small delay
+        # Set progress to 99.9% before writing the result
+        file_storage.set(f"progress:{task_id}", 99.9)
+        logger.info(f"Progress set to 99.9% for task {task_id}")
 
-        # Final verification
+        # Write the result
+        file_storage.set(f"result:{task_id}", result)
+        logger.info(f"Result set for task {task_id}")
+
+        # Add a small delay
+        time.sleep(0.5)
+
+        # Verify the result was written correctly
         stored_result = file_storage.get(f"result:{task_id}")
-        logger.info(f"Verification: Stored result for task {task_id}: {stored_result}")
         if stored_result is None:
             logger.error(f"Failed to store result for task {task_id}")
         else:
-            logger.info(f"Successfully stored and retrieved result for task {task_id}")
+            logger.info(f"Successfully verified result for task {task_id}: {stored_result}")
+            # Only set progress to 100% if the result was successfully stored
+            file_storage.set(f"progress:{task_id}", 100)
+            logger.info(f"Progress set to 100% for task {task_id}")
 
-        logger.info("Processing completed successfully. Progress set to 100%.")
+        logger.info("Processing completed successfully.")
 
     except Exception as e:
         logger.error(f"Error processing PDFs: {e}", exc_info=True)
         error_result = {'status': 'error', 'message': str(e)}
-        file_storage.set_result_and_progress(task_id, error_result, 100)
-        logger.info("Progress set to 100% due to an unexpected error.")
+        
+        # Set progress to 99.9% before writing the error result
+        file_storage.set(f"progress:{task_id}", 99.9)
+        logger.info(f"Progress set to 99.9% for task {task_id} due to an error")
+        
+        # Write the error result
+        file_storage.set(f"result:{task_id}", error_result)
+        logger.info(f"Error result set for task {task_id}")
+        
+        time.sleep(0.5)
+        
+        # Verify the error result was written correctly
+        stored_result = file_storage.get(f"result:{task_id}")
+        if stored_result is None:
+            logger.error(f"Failed to store error result for task {task_id}")
+        else:
+            logger.info(f"Successfully verified error result for task {task_id}: {stored_result}")
+            # Only set progress to 100% if the error result was successfully stored
+            file_storage.set(f"progress:{task_id}", 100)
+            logger.info(f"Progress set to 100% for task {task_id} after error")
 
     finally:
-        logger.info("PDF processing completed (success or failure). Progress ensured at 100%.")
+        logger.info("PDF processing completed (success or failure).")
 
 def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_set, 
                      drive_service, folder_ids, task_id, total_pdfs, file_storage):

@@ -29,61 +29,81 @@ logger = logging.getLogger(__name__)
 
 @api_bp.route('/process-pdfs', methods=['POST'])
 def process_pdfs():
-    """
-    Endpoint to initiate PDF processing.
-    Expects:
-        - 'excelFile' (optional): Uploaded Excel file.
-        - 'sheetsFileId' (optional): Google Sheets file ID.
-        - 'folderId' (required): Google Drive folder ID containing PDFs.
-    Returns:
-        - JSON response with status and task_id.
-    """
-    credentials = get_credentials()
-    if not credentials:
-        return jsonify({"status": "error", "message": "Usuario no autenticado"}), 401
+    logger.info("Entering process_pdfs function")
+    try:
+        logger.info(f"Request method: {request.method}")
+        logger.info(f"Request form: {request.form}")
+        logger.info(f"Request files: {request.files}")
+        
+        logger.info("Attempting to get credentials")
+        credentials = get_credentials()
+        logger.info(f"Credentials retrieved: {'Success' if credentials else 'Failed'}")
+        
+        if not credentials:
+            logger.error("No credentials found")
+            return jsonify({"status": "error", "message": "Usuario no autenticado"}), 401
 
-    drive_service = get_drive_service(credentials)
-    sheets_service = get_sheets_service(credentials)
+        logger.info("Initializing drive service")
+        drive_service = get_drive_service(credentials)
+        logger.info("Drive service initialized")
+        
+        logger.info("Initializing sheets service")
+        sheets_service = get_sheets_service(credentials)
+        logger.info("Sheets service initialized")
 
-    timestamp = time.strftime('%Y%m%d_%H%M%S')
-    folder_name = f"Proceso_{timestamp}"
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        folder_name = f"Proceso_{timestamp}"
+        logger.info(f"Creating folder: {folder_name}")
+        main_folder_id, folder_ids = get_folder_ids(drive_service, folder_name)
+        logger.info(f"Folder created with ID: {main_folder_id}")
 
-    main_folder_id, folder_ids = get_folder_ids(drive_service, folder_name)
+        logger.info("Retrieving form data")
+        excel_file = request.files.get('excelFile')
+        sheets_file_id = request.form.get('sheetsFileId')
+        folder_id = request.form.get('folderId')
+        logger.info(f"Form data: excel_file: {'Present' if excel_file else 'Not present'}, sheets_file_id: {sheets_file_id}, folder_id: {folder_id}")
 
-    excel_file = request.files.get('excelFile')
-    sheets_file_id = request.form.get('sheetsFileId')
-    folder_id = request.form.get('folderId')  # Folder ID from Google Drive
+        if not (excel_file or sheets_file_id) or not folder_id:
+            logger.error("Missing required files or folder ID")
+            return jsonify({"status": "error", "message": "Faltan archivos o ID de carpeta"}), 400
 
-    if not (excel_file or sheets_file_id) or not folder_id:
-        return jsonify({"status": "error", "message": "Faltan archivos o ID de carpeta"}), 400
+        # Read Excel file into memory if provided
+        if excel_file:
+            excel_file_content = excel_file.read()
+            excel_filename = secure_filename(excel_file.filename)
+            logger.info(f"Excel file read: {excel_filename}")
+        else:
+            excel_file_content = None
+            excel_filename = None
+            logger.info("No Excel file provided")
 
-    # Read Excel file into memory if provided
-    if excel_file:
-        excel_file_content = excel_file.read()
-        excel_filename = secure_filename(excel_file.filename)
-    else:
-        excel_file_content = None
-        excel_filename = None
+        # Generate a unique task ID
+        task_id = f"task_{uuid.uuid4().hex}"
+        logger.info(f"Generated task ID: {task_id}")
 
-    # Generate a unique task ID
-    task_id = f"task_{uuid.uuid4().hex}"
+        # Initialize FileBasedStorage within the endpoint
+        file_storage = FileBasedStorage()
+        logger.info("FileBasedStorage initialized")
 
-    # Initialize FileBasedStorage within the endpoint
-    file_storage = FileBasedStorage()
+        # Initialize progress in FileBasedStorage
+        file_storage.set(f"progress:{task_id}:total", 0)
+        file_storage.set(f"progress:{task_id}:completed", 0)
+        file_storage.set(f"progress:{task_id}", 0)
+        logger.info("Progress initialized in FileBasedStorage")
 
-    # Initialize progress in FileBasedStorage
-    file_storage.set(f"progress:{task_id}:total", 0)  # Total PDFs unknown at this point
-    file_storage.set(f"progress:{task_id}:completed", 0)
-    file_storage.set(f"progress:{task_id}", 0)  # Overall progress
+        # Start a multiprocessing.Process to handle the task
+        logger.info("Starting multiprocessing task")
+        process = multiprocessing.Process(target=process_task, args=(
+            folder_id, excel_file_content, excel_filename, sheets_file_id,
+            credentials.to_json(), folder_ids, main_folder_id, task_id))
+        process.start()
+        logger.info(f"Multiprocessing task started with PID: {process.pid}")
 
-    # Start a multiprocessing.Process to handle the task
-    process = multiprocessing.Process(target=process_task, args=(
-        folder_id, excel_file_content, excel_filename, sheets_file_id,
-        credentials.to_json(), folder_ids, main_folder_id, task_id))
-    process.start()
-
-    return jsonify({"status": "success", "task_id": task_id}), 200
-
+        logger.info(f"Returning success response with task_id: {task_id}")
+        return jsonify({"status": "success", "task_id": task_id}), 200
+    except Exception as e:
+        logger.error(f"Error in process_pdfs: {str(e)}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 def process_task(folder_id, excel_file_content, excel_filename, sheets_file_id,
                  credentials_json, folder_ids, main_folder_id, task_id):
     """
@@ -125,6 +145,9 @@ def get_progress(task_id):
     Returns:
         - JSON response with progress percentage and status.
     """
+    
+    logger.info(f"get_progress called for task {task_id}")
+
     # Initialize FileBasedStorage within the endpoint
     file_storage = FileBasedStorage()
 
@@ -144,17 +167,26 @@ def get_progress(task_id):
     response = {'progress': progress}
 
     if progress >= 100:
-        result = file_storage.get(f"result:{task_id}")
-        logger.info(f"Retrieved result for completed task {task_id}: {result}")
+        max_retries = 5
+        retry_delay = 0.5  # seconds
         
-        if result:
-            # Since result is already a dictionary, no need to call json.loads
+        for attempt in range(max_retries):
+            result = file_storage.get(f"result:{task_id}")
+            logger.info(f"Retrieved result for completed task {task_id} (attempt {attempt + 1}): {result}")
+            
+            if result:
+                response['status'] = 'completed'
+                response['result'] = result
+                break
+            else:
+                logger.warning(f"No result found for completed task {task_id} (attempt {attempt + 1})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+        
+        if not result:
+            logger.error(f"Failed to retrieve result for task {task_id} after {max_retries} attempts")
             response['status'] = 'completed'
-            response['result'] = result
-        else:
-            logger.warning(f"No result found for completed task {task_id}")
-            response['status'] = 'completed'
-            response['result'] = {'status': 'error', 'message': 'No result available.'}
+            response['result'] = {'status': 'error', 'message': 'No result available after multiple attempts.'}
     else:
         response['status'] = 'in_progress'
 

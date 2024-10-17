@@ -204,3 +204,4 @@ docker run -p 8080:8080 --env-file .env pdf-merger-app
 ## Clear unused images and cache
 docker system prune -a
 docker builder prune --all
+docker system prune -a --volumes -f

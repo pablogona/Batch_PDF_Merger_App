@@ -21,4 +21,4 @@ ENV PORT=8080
 ENV STORAGE_PATH=/app/storage
 
 # Start the app using Gunicorn
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "--timeout", "120", "app:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "--workers=1", "--timeout=600", "--keep-alive=600", "app:app"]
