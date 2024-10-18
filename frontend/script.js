@@ -110,16 +110,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Function to start polling the server for progress updates
     function startProgressPolling(taskId) {
         const interval = 1000; // milliseconds
-        const progressInterval = setInterval(async () => {
+        let retryCount = 0;
+        const maxRetries = 5;
+    
+        async function attemptFetch() {
             try {
-                const response = await fetch(`/api/progress/${taskId}`);
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
+                const response = await fetchWithRetry(`/api/progress/${taskId}`, 3); // 3 retries in fetchWithRetry
+                retryCount = 0; // Reset retry count on successful fetch
+    
                 const data = await response.json();
                 const progress = data.progress;
                 progressBar.style.width = progress + '%';
-        
+    
                 // Update progress message based on the progress value
                 if (progress < 10) {
                     progressMessage.textContent = 'Inicializando...';
@@ -132,14 +134,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     progressMessage.textContent = 'Proceso completado.';
                 }
-        
+    
                 if (data.status === 'completed') {
-                    clearInterval(progressInterval);
-                    
                     // Add a small delay before fetching the result
                     setTimeout(async () => {
                         try {
-                            const resultResponse = await fetch(`/api/progress/${taskId}`);
+                            const resultResponse = await fetchWithRetry(`/api/progress/${taskId}`, 3);
                             const resultData = await resultResponse.json();
                             
                             progressSection.classList.add('hidden');
@@ -175,20 +175,54 @@ document.addEventListener('DOMContentLoaded', () => {
                             processAgainBtn.classList.remove('hidden');
                         }
                     }, 1000); // 1 second delay
+                    return; // Exit the function as we're done
                 }
+    
+                // Schedule the next attempt
+                setTimeout(attemptFetch, interval);
+    
             } catch (error) {
-                clearInterval(progressInterval);
                 console.error('Error fetching progress:', error);
-                progressSection.classList.add('hidden');
-                resultsSection.classList.remove('hidden');
-                resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
-        
-                // Show only "Procesar Nuevamente" button
-                processAgainBtn.classList.remove('hidden');
+                retryCount++;
+    
+                if (retryCount > maxRetries) {
+                    progressSection.classList.add('hidden');
+                    resultsSection.classList.remove('hidden');
+                    resultsDiv.innerHTML = `<p>Error crítico durante el procesamiento: ${error.message || 'Error desconocido'}</p>`;
+                    processAgainBtn.classList.remove('hidden');
+                } else {
+                    // Inform the user about the retry
+                    progressMessage.textContent = `Error de conexión. Reintentando (${retryCount}/${maxRetries})...`;
+                    // Calculate the next retry delay with exponential backoff
+                    const nextRetryDelay = Math.pow(2, retryCount) * 1000;
+                    console.log(`Next retry in ${nextRetryDelay / 1000} seconds`);
+                    // Schedule the next attempt with exponential backoff
+                    setTimeout(attemptFetch, nextRetryDelay);
+                }
             }
-        }, interval);
+        }
+    
+        // Start the polling process
+        attemptFetch();
     }
     
+    async function fetchWithRetry(url, maxRetries, retryCount = 0) {
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response;
+        } catch (error) {
+            if (retryCount < maxRetries) {
+                const delay = Math.pow(2, retryCount) * 1000; // Exponential backoff
+                await new Promise(resolve => setTimeout(resolve, delay));
+                return fetchWithRetry(url, maxRetries, retryCount + 1);
+            } else {
+                throw error;
+            }
+        }
+    }
 
     // Event for selecting Excel files
     selectExcelBtn.addEventListener('click', () => {
