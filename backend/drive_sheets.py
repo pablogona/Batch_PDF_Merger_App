@@ -5,10 +5,13 @@ from googleapiclient.http import MediaIoBaseUpload
 import io
 import pandas as pd
 import logging
+import traceback
+import json
 from backend.utils import normalize_text
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception
 from googleapiclient.errors import HttpError
 from threading import Lock
+from tenacity import retry_if_exception_type, wait_random_exponential
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -19,43 +22,77 @@ sheet_cache = {}
 sheet_cache_lock = Lock()
 
 def is_retryable_exception(exception):
-    """Determine if an exception is retryable based on HTTP status codes."""
+    """
+    Determine if an exception is retryable based on HTTP status codes and error reasons.
+    
+    :param exception: Exception instance to evaluate.
+    :return: Boolean indicating if the exception is retryable.
+    """
     if isinstance(exception, HttpError):
-        if exception.resp.status in [500, 502, 503, 504]:
+        status = exception.resp.status
+        if status in [500, 502, 503, 504, 429]:
+            # Retry for server errors and too many requests
             return True
+        if status == 403:
+            # Check if the error is due to rate limiting
+            try:
+                error_content = json.loads(exception.content.decode('utf-8'))
+                error_reason = error_content.get('error', {}).get('errors', [{}])[0].get('reason', '')
+                if error_reason in ['userRateLimitExceeded', 'quotaExceeded']:
+                    return True
+            except (json.JSONDecodeError, IndexError, KeyError, AttributeError):
+                # If parsing fails, do not retry
+                return False
+    # Retry for general network errors
+    if isinstance(exception, (ConnectionError, TimeoutError)):
+        return True
     return False
 
-# Retry configuration for Google API calls
+# Retry configuration for Google API calls with exponential backoff and jitter
 retry_decorator = retry(
     retry=retry_if_exception(is_retryable_exception),
-    wait=wait_exponential(multiplier=1, min=2, max=60),
+    wait=wait_random_exponential(multiplier=1, max=60),  # Adds jitter to the backoff
     stop=stop_after_attempt(5),
     reraise=True
 )
 
 def get_drive_service(credentials):
-    """Get the Google Drive API service."""
+    """
+    Get the Google Drive API service.
+    
+    :param credentials: Authorized credentials.
+    :return: Google Drive service instance.
+    """
     try:
         service = build('drive', 'v3', credentials=credentials)
         logger.info("Google Drive service initialized.")
         return service
     except Exception as e:
-        logger.error(f"Failed to initialize Google Drive service: {str(e)}")
+        logger.error(f"Failed to initialize Google Drive service: {str(e)}", exc_info=True)
         raise
 
 def get_sheets_service(credentials):
-    """Get the Google Sheets API service."""
+    """
+    Get the Google Sheets API service.
+    
+    :param credentials: Authorized credentials.
+    :return: Google Sheets service instance.
+    """
     try:
         service = build('sheets', 'v4', credentials=credentials)
         logger.info("Google Sheets service initialized.")
         return service
     except Exception as e:
-        logger.error(f"Failed to initialize Google Sheets service: {str(e)}")
+        logger.error(f"Failed to initialize Google Sheets service: {str(e)}", exc_info=True)
         raise
 
 def get_sheet_names(sheet_id, sheets_service):
     """
     Retrieve the sheet names from the Google Sheets file.
+    
+    :param sheet_id: ID of the Google Sheet.
+    :param sheets_service: Authorized Google Sheets service instance.
+    :return: List of sheet names.
     """
     try:
         sheet_metadata = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
@@ -64,7 +101,7 @@ def get_sheet_names(sheet_id, sheets_service):
         logger.info(f"Sheet names in spreadsheet '{sheet_id}': {sheet_names}")
         return sheet_names
     except Exception as e:
-        logger.error(f"Error retrieving sheet names from spreadsheet '{sheet_id}': {e}")
+        logger.error(f"Error retrieving sheet names from spreadsheet '{sheet_id}': {e}", exc_info=True)
         raise
 
 @retry_decorator
@@ -103,10 +140,10 @@ def get_or_create_folder(folder_name, drive_service, parent_id='root'):
             logger.info(f"Folder '{folder_name}' created in Google Drive with ID: {folder_id}")
         return folder_id
     except HttpError as e:
-        logger.error(f"HttpError in get_or_create_folder for '{folder_name}': {e}")
+        logger.error(f"HttpError in get_or_create_folder for '{folder_name}': {e}", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Error in get_or_create_folder for '{folder_name}': {e}")
+        logger.error(f"Error in get_or_create_folder for '{folder_name}': {e}", exc_info=True)
         raise
 
 @retry_decorator
@@ -141,10 +178,10 @@ def upload_excel_to_drive(file_stream, file_name, drive_service, parent_folder_i
         logger.info(f"Excel file '{file_name}' uploaded to Google Drive as Google Sheet with ID: {spreadsheet_id}")
         return spreadsheet_id
     except HttpError as e:
-        logger.error(f"HttpError in upload_excel_to_drive for '{file_name}': {e}")
+        logger.error(f"HttpError in upload_excel_to_drive for '{file_name}': {e}", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Error in upload_excel_to_drive for '{file_name}': {e}")
+        logger.error(f"Error in upload_excel_to_drive for '{file_name}': {e}", exc_info=True)
         raise
 
 @retry_decorator
@@ -179,10 +216,10 @@ def upload_file_to_drive(file_stream, folder_id, drive_service, file_name, mimet
         logger.info(f"File '{file_name}' uploaded to folder '{folder_id}' in Google Drive with ID: {file_id}")
         return file_id
     except HttpError as e:
-        logger.error(f"HttpError in upload_file_to_drive for '{file_name}': {e}")
+        logger.error(f"HttpError in upload_file_to_drive for '{file_name}': {e}", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Error in upload_file_to_drive for '{file_name}': {e}")
+        logger.error(f"Error in upload_file_to_drive for '{file_name}': {e}", exc_info=True)
         raise
 
 @retry_decorator
@@ -257,10 +294,10 @@ def read_sheet_data(sheet_id, sheets_service):
         return df, sheet_name
 
     except HttpError as e:
-        logger.error(f"HttpError in read_sheet_data for sheet '{sheet_id}': {e}")
+        logger.error(f"HttpError in read_sheet_data for sheet '{sheet_id}': {e}", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Error in read_sheet_data for sheet '{sheet_id}': {e}")
+        logger.error(f"Error in read_sheet_data for sheet '{sheet_id}': {e}", exc_info=True)
         raise
 
 def update_sheet_with_new_columns(sheet_id, sheet_name, columns, sheets_service):
@@ -285,7 +322,7 @@ def update_sheet_with_new_columns(sheet_id, sheet_name, columns, sheets_service)
         ).execute()
         logger.info(f"Sheet '{sheet_name}' header updated with new columns.")
     except Exception as e:
-        logger.error(f"Error updating sheet '{sheet_name}' with new columns: {e}")
+        logger.error(f"Error updating sheet '{sheet_name}' with new columns: {e}", exc_info=True)
         raise
 
 def col_idx_to_letter(idx):
@@ -355,23 +392,29 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
 
             # Prepare updates for each column individually
             # Update 'FOLIO' (whatever it's called)
-            folio_col_letter = col_idx_to_letter(folio_col_idx)
-            folio_range = f"'{sheet_name}'!{folio_col_letter}{row_number}"
-            folio_values = [[folio_number]]
-            updates.append({'range': folio_range, 'values': folio_values})
+            if folio_col_idx is not None:
+                folio_col_letter = col_idx_to_letter(folio_col_idx)
+                folio_range = f"'{sheet_name}'!{folio_col_letter}{row_number}"
+                folio_values = [[folio_number]]
+                updates.append({'range': folio_range, 'values': folio_values})
+            else:
+                logger.warning("Folio column not found. Skipping folio update.")
 
             # Update 'OFICINA' (whatever it's called)
-            office_col_letter = col_idx_to_letter(office_col_idx)
-            office_range = f"'{sheet_name}'!{office_col_letter}{row_number}"
-            office_values = [[office]]
-            updates.append({'range': office_range, 'values': office_values})
+            if office_col_idx is not None:
+                office_col_letter = col_idx_to_letter(office_col_idx)
+                office_range = f"'{sheet_name}'!{office_col_letter}{row_number}"
+                office_values = [[office]]
+                updates.append({'range': office_range, 'values': office_values})
+            else:
+                logger.warning("Oficina column not found. Skipping oficina update.")
 
-            if batch_updates is not None:
+            if batch_updates is not None and updates:
                 # Add updates to batch_updates
                 for update in updates:
                     batch_updates.append(update)
                     logger.info(f"Added update for client '{client_name}': Range: {update['range']}, Values: {update['values']}")
-            else:
+            elif updates:
                 # Perform updates individually
                 for update in updates:
                     body = {
@@ -391,7 +434,7 @@ def update_google_sheet(sheet_id, client_name, folio_number, office, sheets_serv
             return None
 
     except Exception as e:
-        logger.error(f"Error in update_google_sheet for client '{client_name}': {e}")
+        logger.error(f"Error in update_google_sheet for client '{client_name}': {e}", exc_info=True)
         raise
 
 @retry_decorator
@@ -402,7 +445,7 @@ def batch_update_google_sheet(spreadsheet_id, data, sheets_service):
     :param spreadsheet_id: ID of the spreadsheet to update.
     :param data: List of dictionaries with 'range' and 'values'.
     :param sheets_service: Authorized Sheets API service instance.
-    :return: Result of the batch update.
+    :return: True if successful.
     """
     try:
         # Split data into chunks to avoid exceeding API limits
@@ -424,10 +467,10 @@ def batch_update_google_sheet(spreadsheet_id, data, sheets_service):
             logger.info(f"Batch updated Google Sheet '{spreadsheet_id}' with {len(chunk)} updates.")
         return True
     except HttpError as e:
-        logger.error(f"HttpError in batch_update_google_sheet for sheet '{spreadsheet_id}': {e}")
+        logger.error(f"HttpError in batch_update_google_sheet for sheet '{spreadsheet_id}': {e}", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f"Error in batch_update_google_sheet for sheet '{spreadsheet_id}': {e}")
+        logger.error(f"Error in batch_update_google_sheet for sheet '{spreadsheet_id}': {e}", exc_info=True)
         raise
 
 def get_folder_ids(drive_service, folder_name):
@@ -440,7 +483,7 @@ def get_folder_ids(drive_service, folder_name):
     """
     try:
         main_folder_name = 'PDF Merger App'
-        subfolders = ['PDFs Unificados', 'PDFs con Error', 'PDFs Originales']
+        subfolders = ['PDFs Unificados', 'PDFs con Error', 'PDFs Originales', 'Demandas con Ñ']  # Added new folder
 
         # Get or create main folder
         main_folder_id = get_or_create_folder(main_folder_name, drive_service)
@@ -456,5 +499,5 @@ def get_folder_ids(drive_service, folder_name):
 
         return process_folder_id, folder_ids
     except Exception as e:
-        logger.error(f"Error in get_folder_ids for '{folder_name}': {e}")
+        logger.error(f"Error in get_folder_ids for '{folder_name}': {e}", exc_info=True)
         raise

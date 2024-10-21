@@ -25,12 +25,51 @@ from backend.drive_sheets import (
     batch_update_google_sheet
 )
 from backend.utils import normalize_text
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import (
+    retry,
+    wait_random_exponential,
+    stop_after_attempt,
+    retry_if_exception
+)
 from filelock import FileLock
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# -------------------- Retry Configuration -------------------- #
+
+def is_retryable_exception(exception):
+    """
+    Determine if an exception is retryable based on HTTP status codes and network errors.
+    """
+    if isinstance(exception, HttpError):
+        status = exception.resp.status
+        if status in [500, 502, 503, 504, 429]:
+            # Retry for server errors and too many requests
+            return True
+        if status == 403:
+            try:
+                error_content = json.loads(exception.content.decode('utf-8'))
+                error_reason = error_content.get('error', {}).get('errors', [{}])[0].get('reason', '')
+                if error_reason in ['userRateLimitExceeded', 'quotaExceeded']:
+                    return True
+            except (json.JSONDecodeError, AttributeError) as e:
+                logger.error(f"Error parsing HttpError content: {e}", exc_info=True)
+    # Retry for general network errors
+    if isinstance(exception, (ConnectionError, TimeoutError)):
+        return True
+    return False
+
+# Retry decorator with exponential backoff and jitter
+retry_decorator = retry(
+    retry=retry_if_exception(is_retryable_exception),
+    wait=wait_random_exponential(multiplier=1, max=60),  # Exponential backoff with jitter
+    stop=stop_after_attempt(5),
+    reraise=True
+)
+
+# -------------------- File-Based Storage Class -------------------- #
 
 class FileBasedStorage:
     def __init__(self, base_path=None):
@@ -153,46 +192,53 @@ class FileBasedStorage:
         else:
             logger.info(f"Successfully verified result for task {task_id}: {stored_result}")
 
-# No module-level initialization of file_storage
-# All instances will be created within functions to ensure proper process handling
+# -------------------- Google API Interaction Functions -------------------- #
 
-# Retry decorator for Google API calls to handle transient errors
-@retry(
-    retry=retry_if_exception_type(HttpError),
-    wait=wait_exponential(multiplier=1, min=2, max=60),
-    stop=stop_after_attempt(5),
-    reraise=True
-)
+@retry_decorator
 def list_drive_files(drive_service, folder_id, page_token):
     """
     List PDF files in a specific Google Drive folder.
     """
-    response = drive_service.files().list(
-        q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
-        spaces='drive',
-        fields='nextPageToken, files(id, name)',
-        pageToken=page_token,
-        pageSize=1000
-    ).execute()
-    return response
+    try:
+        response = drive_service.files().list(
+            q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
+            spaces='drive',
+            fields='nextPageToken, files(id, name)',
+            pageToken=page_token,
+            pageSize=1000
+        ).execute()
+        return response
+    except HttpError as e:
+        logger.error(f"HttpError in list_drive_files for folder '{folder_id}': {e}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in list_drive_files for folder '{folder_id}': {e}", exc_info=True)
+        raise
 
-@retry(
-    retry=retry_if_exception_type(HttpError),
-    wait=wait_exponential(multiplier=1, min=2, max=60),
-    stop=stop_after_attempt(5),
-    reraise=True
-)
+@retry_decorator
 def download_drive_file(drive_service, file_id):
     """
     Download the content of a PDF file from Google Drive.
     """
-    request = drive_service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    return fh.getvalue()
+    try:
+        request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                logger.debug(f"Download progress: {int(status.progress() * 100)}%.")
+        fh.seek(0)
+        return fh.getvalue()
+    except HttpError as e:
+        logger.error(f"HttpError in download_drive_file for file ID '{file_id}': {e}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in download_drive_file for file ID '{file_id}': {e}", exc_info=True)
+        raise
+
+# -------------------- PDF Processing Functions -------------------- #
 
 def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id, file_storage):
     """
@@ -211,7 +257,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id, file_storage
             if page_token is None:
                 break
         except HttpError as e:
-            logger.error(f"Error listing files in folder '{folder_id}': {e}")
+            logger.error(f"Error listing files in folder '{folder_id}': {e}", exc_info=True)
             raise e  # Let the retry mechanism handle it
 
     total_pdfs = len(files)
@@ -239,7 +285,7 @@ def fetch_pdfs_from_drive_folder(folder_id, drive_service, task_id, file_storage
             file_storage.set(f"progress:{task_id}", round(progress_value, 1))
             logger.info(f"Fetched {processed_pdfs}/{total_pdfs} PDFs. Progress: {progress_value:.1f}%")
         except HttpError as e:
-            logger.error(f"Failed to fetch PDF {file['name']}: {e}")
+            logger.error(f"Failed to fetch PDF {file['name']}: {e}", exc_info=True)
             continue  # Skip this file and continue with others
 
     return pdf_files_data
@@ -456,7 +502,7 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                     logger.info("No updates to perform on Google Sheets.")
 
         except Exception as e:
-            logger.error(f"Error during PDF pairing: {str(e)}", exc_info=True)
+            logger.error(f"Error during PDF pairing: {e}", exc_info=True)
             error_result = {'status': 'error', 'message': f"PDF pairing failed: {str(e)}"}
             file_storage.set(f"progress:{task_id}", 99.9)
             file_storage.set(f"result:{task_id}", error_result)
@@ -477,12 +523,12 @@ def process_pdfs_in_folder(folder_id, excel_file_content, excel_filename, sheets
                 excel_file_name = 'PDFs con Error.xlsx'
                 upload_file_to_drive(
                     excel_buffer,
-                    main_folder_id,
+                    folder_ids['PDFs con Error'],
                     drive_service,
                     excel_file_name,
                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
-                logger.info(f"Excel file '{excel_file_name}' uploaded to process folder with ID: {main_folder_id}")
+                logger.info(f"Excel file '{excel_file_name}' uploaded to 'PDFs con Error' with ID: {folder_ids['PDFs con Error']}")
             except Exception as e:
                 logger.error(f"Error creating or uploading Excel file for errors: {e}", exc_info=True)
         else:
@@ -564,6 +610,7 @@ def extract_pdf_info(pdf_data, pdf_info_list, errors, error_data, error_files_se
             logger.info(f"Successfully uploaded {pdf_filename} to 'PDFs Originales'")
         except Exception as e:
             logger.error(f"Error uploading original PDF '{pdf_filename}' to 'PDFs Originales': {e}", exc_info=True)
+            # Optionally, implement retry logic here if desired
 
         # Classify the PDF
         pdf_type = classify_pdf(pdf_content, pdf_filename)
@@ -743,7 +790,6 @@ def classify_pdf(pdf_content, filename):
         logger.debug(f"Unable to classify '{filename}'.")
         return 'UNKNOWN'
 
-
 def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_files_set):
     """
     Pairs ACUSE and DEMANDA PDFs based on the extracted names and uploads unmatched or duplicate PDFs to 'PDFs con Error'.
@@ -759,7 +805,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
     Returns:
         tuple: A tuple containing the list of valid pairs and a list of errors.
     """
-    # Use defaultdict to handle multiple PDFs per name
     acuse_dict = defaultdict(list)
     demanda_dict = defaultdict(list)
     pairs = []
@@ -767,14 +812,13 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
 
     # Separate PDFs into ACUSE and DEMANDA
     for pdf_info in pdf_info_list:
-        pdf_type = pdf_info['info'].get('type')  # 'ACUSE' or 'DEMANDA'
+        pdf_type = pdf_info['info'].get('type')
         normalized_name = pdf_info['info'].get('normalized_name')
         if pdf_type == 'ACUSE' and normalized_name:
             acuse_dict[normalized_name].append(pdf_info)
         elif pdf_type == 'DEMANDA' and normalized_name:
             demanda_dict[normalized_name].append(pdf_info)
         else:
-            # If type is missing but name is present, treat it as ACUSE
             if normalized_name:
                 acuse_dict[normalized_name].append(pdf_info)
             else:
@@ -786,7 +830,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_files_set[pdf_info['file_name']] = True
                     logger.warning(f"Unknown or missing PDF type and name for {pdf_info['file_name']}")
 
-    # Identify duplicate names
     duplicate_names_acuse = set()
     duplicate_names_demanda = set()
 
@@ -804,7 +847,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_files_set[pdf_filename] = True
                     logger.warning(f"Duplicate ACUSE found for name '{name}' in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
@@ -814,7 +856,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     }
                     error_data.append(error_entry)
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(pdf_info['content']),
@@ -840,7 +881,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_files_set[pdf_filename] = True
                     logger.warning(f"Duplicate DEMANDA found for name '{name}' in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
@@ -850,7 +890,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     }
                     error_data.append(error_entry)
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(pdf_info['content']),
@@ -880,7 +919,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_files_set[pdf_filename] = True
                     logger.warning(f"ACUSE for duplicated DEMANDA name '{name}' in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
@@ -890,7 +928,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     }
                     error_data.append(error_entry)
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(acuse_pdf['content']),
@@ -916,7 +953,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_files_set[pdf_filename] = True
                     logger.warning(f"DEMANDA for duplicated ACUSE name '{name}' in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
@@ -926,7 +962,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     }
                     error_data.append(error_entry)
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(demanda_pdf['content']),
@@ -947,41 +982,39 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
             acuse_pdf = acuse_list[0]
             demanda_pdf = demanda_list[0]
 
-            # Merge info from both DEMANDA and ACUSE, ensuring the name from DEMANDA is retained
-            combined_info = {**acuse_pdf['info'], **demanda_pdf['info']}  # Ensure DEMANDA info overrides ACUSE
-            combined_info['name'] = demanda_pdf['info']['name']  # Explicitly set the correct name from DEMANDA
+            combined_info = {**acuse_pdf['info'], **demanda_pdf['info']}
+            combined_info['name'] = demanda_pdf['info']['name']
 
             pairs.append({
-                'name': combined_info['name'],  # Use the correct name for final processing
+                'name': combined_info['name'],
                 'pdfs': [acuse_pdf['content'], demanda_pdf['content']],
                 'info': combined_info,
-                'file_name': demanda_pdf['file_name'],  # Assuming DEMANDA is the primary file
+                'file_name': demanda_pdf['file_name'],
                 'pdf_filenames': [acuse_pdf['file_name'], demanda_pdf['file_name']]
             })
         else:
-            # This should not happen as duplicates are already handled
             logger.error(f"Unexpected number of ACUSEs or DEMANDAs for name '{name}'")
+            # Handle unexpected number of ACUSEs
             for pdf_info in acuse_list:
                 pdf_filename = pdf_info['file_name']
                 if pdf_filename not in error_files_set:
+                    pdf_type = "ACUSEs"
                     errors.append({
                         'file_name': pdf_filename,
-                        'message': f"Cantidad inesperada de ACUSEs para el nombre: {name}"
+                        'message': f"Cantidad inesperada de {pdf_type} para el nombre: {name}"
                     })
                     error_files_set[pdf_filename] = True
-                    logger.warning(f"Unexpected number of ACUSEs for name '{name}' in file '{pdf_filename}'")
+                    logger.warning(f"Unexpected number of {pdf_type} for name '{name}' in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
                         'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
                         'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
-                        'ERROR': f"Cantidad inesperada de ACUSEs para el nombre: {name}"
+                        'ERROR': f"Cantidad inesperada de {pdf_type} para el nombre: {name}"
                     }
                     error_data.append(error_entry)
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(pdf_info['content']),
@@ -993,27 +1026,27 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     except Exception as e:
                         logger.error(f"Error uploading unexpected ACUSE '{pdf_filename}' to 'PDFs con Error': {e}", exc_info=True)
 
+            # Handle unexpected number of DEMANDAs
             for pdf_info in demanda_list:
                 pdf_filename = pdf_info['file_name']
                 if pdf_filename not in error_files_set:
+                    pdf_type = "DEMANDAs"
                     errors.append({
                         'file_name': pdf_filename,
-                        'message': f"Cantidad inesperada de DEMANDAs para el nombre: {name}"
+                        'message': f"Cantidad inesperada de {pdf_type} para el nombre: {name}"
                     })
                     error_files_set[pdf_filename] = True
-                    logger.warning(f"Unexpected number of DEMANDAs for name '{name}' in file '{pdf_filename}'")
+                    logger.warning(f"Unexpected number of {pdf_type} for name '{name}' in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': name,
                         'FOLIO DE REGISTRO': pdf_info['info'].get('folio_number', ''),
                         'OFICINA DE CORRESPONDENCIA': pdf_info['info'].get('oficina', ''),
-                        'ERROR': f"Cantidad inesperada de DEMANDAs para el nombre: {name}"
+                        'ERROR': f"Cantidad inesperada de {pdf_type} para el nombre: {name}"
                     }
                     error_data.append(error_entry)
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(pdf_info['content']),
@@ -1037,7 +1070,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     })
                     logger.warning(f"No matching ACUSE found for DEMANDA: {name} in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': demanda_pdf['info'].get('name', ''),
@@ -1048,7 +1080,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_data.append(error_entry)
                     error_files_set[pdf_filename] = True
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(demanda_pdf['content']),
@@ -1072,7 +1103,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     })
                     logger.warning(f"No matching DEMANDA found for ACUSE: {name} in file '{pdf_filename}'")
 
-                    # Collect error data
                     error_entry = {
                         'DOCUMENTO': pdf_filename,
                         'NOMBRE_CTE': acuse_pdf['info'].get('name', ''),
@@ -1083,7 +1113,6 @@ def pair_pdfs(pdf_info_list, error_folder_id, drive_service, error_data, error_f
                     error_data.append(error_entry)
                     error_files_set[pdf_filename] = True
 
-                    # Upload to 'PDFs con Error' folder
                     try:
                         upload_file_to_drive(
                             io.BytesIO(acuse_pdf['content']),
@@ -1287,3 +1316,5 @@ def normalize_text(text):
     # Normalize unicode characters
     text = unicodedata.normalize('NFKC', text)
     return text
+
+# -------------------- End of File --------------------
